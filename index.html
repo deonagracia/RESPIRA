@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>RESPIRA — Interactive Respiratory Model &amp; Control Laboratory</title>
+  <meta name="description" content="An interactive environment for exploring respiratory physiology, airway obstruction, CPAP intervention, and feedback control." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='46' fill='%23102A43'/%3E%3Cpath d='M50 18c-4 0-6 4-6 9v14c-10 1-18 9-18 20v18c0 5 3 8 7 8s7-4 7-9V64c0-6 4-10 10-10s10 4 10 10v14c0 5 3 9 7 9s7-3 7-8V61c0-11-8-19-18-20V27c0-5-2-9-6-9z' fill='%237DD3D0'/%3E%3C/svg%3E" />
+</head>
+<body class="theme-home">
+  <div id="app-shell">
+    <header class="site-header" id="site-header">
+      <a class="brand" href="#/home" aria-label="RESPIRA home">
+        <span class="brand-mark">RESPIRA</span>
+        <span class="brand-sub">Respiratory Model &amp; Control Lab</span>
+      </a>
+
+      <nav class="main-nav" id="main-nav" aria-label="Primary">
+        <a href="#/home" data-route="home">Home</a>
+
+        <div class="nav-dropdown" id="learn-dropdown">
+          <button type="button" class="nav-dropdown-trigger" data-route-group="learn" aria-expanded="false">
+            Learn
+            <svg class="chevron" width="10" height="6" viewBox="0 0 10 6" fill="none" aria-hidden="true">
+              <path d="M1 1L5 5L9 1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <div class="nav-dropdown-menu" role="menu">
+            <a href="#/learn/anatomy" role="menuitem"><span class="menu-index">01</span> Anatomy</a>
+            <a href="#/learn/osa" role="menuitem"><span class="menu-index">02</span> OSA</a>
+            <a href="#/learn/cpap" role="menuitem"><span class="menu-index">03</span> CPAP</a>
+          </div>
+        </div>
+
+        <a href="#/simulate" data-route="simulate">Simulate</a>
+        <a href="#/analyze" data-route="analyze">Analyze</a>
+      </nav>
+
+      <button type="button" id="compare-control-btn" class="btn btn-ghost btn-compare">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M2 5h8M10 5l-2.5-2.5M10 5l-2.5 2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M14 11H6M6 11l2.5-2.5M6 11l2.5 2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Compare Control
+      </button>
+    </header>
+
+    <nav id="journey-bar" class="journey-bar" aria-label="Simulation journey" hidden></nav>
+
+    <main id="app" tabindex="-1"></main>
+
+    <div id="modal-root" aria-live="polite"></div>
+    <div id="toast-root" aria-live="polite"></div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
