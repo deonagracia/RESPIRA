@@ -28,6 +28,7 @@ let pressureChart = null;
 let airflowChart = null;
 let volumeChart = null;
 let spo2Chart = null;
+let lastSlowPush = -Infinity;
 let blowerChart = null;
 
 // Memori untuk menghaluskan dinamika paru-paru & timer
@@ -367,10 +368,11 @@ function seedChartsFromHistory() {
   volumeChart?.setData(windowed.map((s) => ({ t: s.t, volume: s.volume })));
   const slowCutoff = samples[samples.length - 1].t - CHART_WINDOW_SEC_SLOW;
   const slow = samples.filter((s) => s.t >= slowCutoff);
-  spo2Chart?.setData(slow.map((s) => ({ t: s.t, spo2: s.spo2 })));
+  spo2Chart?.setData(slow.filter((_, i) => i % 5 === 0).map((s) => ({ t: s.t, spo2: s.spo2 })));
   qs('#empty-spo2')?.setAttribute('hidden', '');
   qs('#empty-volume')?.setAttribute('hidden', '');
-  blowerChart?.setData(slow.map((s) => ({ t: s.t, blower: s.blower })));
+  const slowSparse = slow.filter((_, i) => i % 5 === 0);
+  blowerChart?.setData(slowSparse.map((s) => ({ t: s.t, blower: s.blower })));
   applyEventBands(getState().osaEvents);
 
   qs('#empty-pressure')?.setAttribute('hidden', '');
@@ -382,12 +384,17 @@ function onTick(sample) {
   pressureChart?.push({ t: sample.t, target: sample.target, actual: sample.actual });
   airflowChart?.push({ t: sample.t, flow: sample.flow });
   volumeChart?.push({ t: sample.t, volume: sample.volume });
-  spo2Chart?.push({ t: sample.t, spo2: sample.spo2 });
+  // Tren lambat (SpO2, blower) cukup 5 titik/detik → 600 titik per 2 menit, bukan 3000
+  const pushSlow = sample.t - lastSlowPush >= 0.2 || sample.t < lastSlowPush;
+  if (pushSlow) {
+    lastSlowPush = sample.t;
+    spo2Chart?.push({ t: sample.t, spo2: sample.spo2 });
+    blowerChart?.push({ t: sample.t, blower: sample.blower });
+  }
   const emptySpo2 = qs('#empty-spo2');
   if (emptySpo2) emptySpo2.style.display = 'none';
   const emptyVolume = qs('#empty-volume');
   if (emptyVolume) emptyVolume.style.display = 'none';
-  blowerChart?.push({ t: sample.t, blower: sample.blower });
 
   const emptyPressure = qs('#empty-pressure');
   if (emptyPressure) emptyPressure.style.display = 'none';
@@ -509,6 +516,7 @@ function wireRunButtons() {
     airflowChart?.clear();
     volumeChart?.clear();
     spo2Chart?.clear();
+    lastSlowPush = -Infinity;
     blowerChart?.clear();
     qs('#empty-pressure')?.removeAttribute('hidden');
     qs('#empty-airflow')?.removeAttribute('hidden');

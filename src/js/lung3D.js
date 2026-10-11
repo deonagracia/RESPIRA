@@ -164,7 +164,8 @@ export class LungScene {
 
     // Breathing state
     this._liveMode = false;
-    this._livePhase = 0.15; // 0 = fully exhaled, 1 = fully inhaled
+    this._livePhase = 0.15; // 0 = fully exhaled, 1 = fully inhaled (target dari engine, ~25 Hz)
+    this._smoothPhase = 0.15; // fase yang benar-benar digambar, diinterpolasi tiap frame (~60 Hz)
     this._idleRespRate = 12;
     this._lastAppliedExpansion = 0;
     this._breathingActive = true; // false = animation frozen at its current phase (e.g. simulation paused)
@@ -1054,6 +1055,7 @@ this.anatomyAnchors = {
   resetBreathing() {
     this._breathClock = 0;
     this._livePhase = 0.15;
+    this._smoothPhase = 0.15;
     this._lastEasedPhase = 0;
     this.setLungExpansion(0);
     this.setDiaphragmPosition(0);
@@ -1218,8 +1220,12 @@ this.anatomyAnchors = {
       
       // JIKA SIMULASI BERJALAN (LIVE MODE)
       if (this._liveMode) {
-          phase = this._livePhase; // volume ternormalisasi dari model
-          // Tanpa easing: bentuk gerak harus sama persis dengan kurva volume.
+          // Engine mengirim volume ~25x/detik, layar digambar ~60x/detik.
+          // Interpolasi eksponensial (konstanta waktu ~70 ms) mengisi frame di
+          // antaranya agar gerak kembang-kempis halus tanpa mengubah bentuk kurva.
+          const k = 1 - Math.exp(-dt * 14);
+          this._smoothPhase += (this._livePhase - this._smoothPhase) * k;
+          phase = this._smoothPhase;
           const eased = phase;
           this._breathDirection = eased >= this._lastEasedPhase ? 1 : -1;
           this._lastEasedPhase = eased;

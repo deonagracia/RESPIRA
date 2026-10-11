@@ -48,6 +48,7 @@ export class LineChart {
     this.data = [];
     this.bands = []; // [{start, end, type:'apnea'|'hypopnea'}] — area kejadian OSA
 
+    this._raf = null;
     this._resizeObserver = new ResizeObserver(() => this._resize());
     this._resizeObserver.observe(canvas);
     this._resize();
@@ -82,7 +83,19 @@ export class LineChart {
       this.data.splice(0, this.data.length - this.maxPoints);
     }
 
-    this._render();
+    this._scheduleRender();
+  }
+
+  /**
+   * Gabungkan banyak push() menjadi satu gambar ulang per frame layar,
+   * supaya grafik tidak merebut waktu render animasi paru 3D.
+   */
+  _scheduleRender() {
+    if (this._raf != null) return;
+    this._raf = requestAnimationFrame(() => {
+      this._raf = null;
+      this._render();
+    });
   }
 
   /** Replace the entire buffer at once (static mode). */
@@ -107,6 +120,8 @@ export class LineChart {
   }
 
   destroy() {
+    if (this._raf != null) cancelAnimationFrame(this._raf);
+    this._raf = null;
     this._resizeObserver.disconnect();
   }
 
