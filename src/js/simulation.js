@@ -12,9 +12,11 @@ import { LineChart } from './charts.js';
 import { PHYSIOLOGY } from './respiratoryModel.js';
 import { resetRun } from './simulationEngine.js';
 import { getSamples } from './simHistory.js';
+import { ahiSeverity } from './breathAnalyzer.js';
 
 const LUNG_ANIM_RANGE_L = 1.5; // L di atas FRC yang dipetakan ke ekspansi 3D penuh
-const CHART_WINDOW_SEC = 20; // seconds visible on the live rolling charts
+const CHART_WINDOW_SEC = 30; // s — jendela grafik gelombang napas (±7 napas)
+const CHART_WINDOW_SEC_SLOW = 120; // s — tren lambat (SpO2, blower), cukup untuk 2 siklus apnea
 
 let scene = null;
 let airwayPreview = null;
@@ -25,6 +27,7 @@ let fullscreenHandler = null;
 let pressureChart = null;
 let airflowChart = null;
 let volumeChart = null;
+let spo2Chart = null;
 let blowerChart = null;
 
 // Memori untuk menghaluskan dinamika paru-paru & timer
@@ -142,85 +145,120 @@ export function render() {
       <aside class="floating-panel status-panel open" id="status-panel">
         <header class="floating-panel-header">
           <h3>Live Status</h3>
+          <span class="stat-timer-inline" id="tile-timer"><span id="stat-timer">00:00</span></span>
           <button type="button" class="panel-collapse" data-close="status-panel" aria-label="Collapse panel">&minus;</button>
         </header>
+
+        <p class="stat-group-title">Kontrol CPAP (loop PID)</p>
         <div class="stat-grid">
-          <div class="stat-tile" id="tile-timer">
-            <span class="stat-label">Elapsed Time</span>
-            <span class="stat-value" id="stat-timer">00:00</span>
-          </div>
-          <div class="stat-tile">
-            <span class="stat-label">Target Pressure</span>
-            <span class="stat-value" id="stat-target-pressure">8.0 <small>cmH₂O</small></span>
-          </div>
-          <div class="stat-tile stat-placeholder" id="tile-airflow">
-            <span class="stat-label">Airflow</span>
-            <span class="stat-value" id="stat-airflow">--</span>
-            <span class="stat-note" id="note-airflow">Press Start</span>
-          </div>
-          <div class="stat-tile stat-placeholder" id="tile-resistance">
-            <span class="stat-label">Airway Resistance</span>
-            <span class="stat-value" id="stat-resistance">--</span>
-            <span class="stat-note" id="note-resistance">Press Start</span>
-          </div>
-          <div class="stat-tile stat-placeholder" id="tile-blower">
-            <span class="stat-label">Blower Output</span>
-            <span class="stat-value" id="stat-blower">--</span>
-            <span class="stat-note" id="note-blower">Press Start</span>
-          </div>
-          <div class="stat-tile stat-placeholder" id="tile-error">
-            <span class="stat-label">Error</span>
-            <span class="stat-value" id="stat-error">--</span>
-            <span class="stat-note" id="note-error">Press Start</span>
-          </div>
-          <div class="stat-tile stat-placeholder" id="tile-volume">
-            <span class="stat-label">Lung Volume</span>
-            <span class="stat-value" id="stat-volume">--</span>
-            <span class="stat-note" id="note-volume">Press Start</span>
-          </div>
-          <div class="stat-tile stat-placeholder" id="tile-ve">
-            <span class="stat-label">Minute Ventilation</span>
-            <span class="stat-value" id="stat-ve">--</span>
-            <span class="stat-note" id="note-ve">Press Start</span>
-          </div>
-          <div class="stat-tile stat-placeholder" id="tile-spo2">
-            <span class="stat-label">SpO₂</span>
-            <span class="stat-value" id="stat-spo2">--</span>
-            <span class="stat-note" id="note-spo2">Press Start</span>
-          </div>
-          <div class="stat-tile stat-placeholder" id="tile-eff-obs">
-            <span class="stat-label">Effective Obstruction</span>
-            <span class="stat-value" id="stat-eff-obs">--</span>
-            <span class="stat-note" id="note-eff-obs">Press Start</span>
-          </div>
+            <div class="stat-tile">
+              <span class="stat-label">Target Pressure</span>
+              <span class="stat-value" id="stat-target-pressure">8.0 <small>cmH₂O</small></span>
+            </div>
+            <div class="stat-tile stat-placeholder" id="tile-actual-pressure">
+              <span class="stat-label">Mask Pressure</span>
+              <span class="stat-value" id="stat-actual-pressure">--</span>
+              <span class="stat-note" id="note-actual-pressure">Press Start</span>
+            </div>
+            <div class="stat-tile stat-placeholder" id="tile-error">
+              <span class="stat-label">Error</span>
+              <span class="stat-value" id="stat-error">--</span>
+              <span class="stat-note" id="note-error">Press Start</span>
+            </div>
+            <div class="stat-tile stat-placeholder" id="tile-blower">
+              <span class="stat-label">Blower Output</span>
+              <span class="stat-value" id="stat-blower">--</span>
+              <span class="stat-note" id="note-blower">Press Start</span>
+            </div>
+        </div>
+
+        <p class="stat-group-title">Ventilasi</p>
+        <div class="stat-grid">
+            <div class="stat-tile stat-placeholder" id="tile-vt">
+              <span class="stat-label">Tidal Volume (VT)</span>
+              <span class="stat-value" id="stat-vt">--</span>
+              <span class="stat-note" id="note-vt">Press Start</span>
+            </div>
+            <div class="stat-tile stat-placeholder" id="tile-rr">
+              <span class="stat-label">Resp. Rate (terukur)</span>
+              <span class="stat-value" id="stat-rr">--</span>
+              <span class="stat-note" id="note-rr">Press Start</span>
+            </div>
+            <div class="stat-tile stat-placeholder" id="tile-ve">
+              <span class="stat-label">Minute Ventilation</span>
+              <span class="stat-value" id="stat-ve">--</span>
+              <span class="stat-note" id="note-ve">Press Start</span>
+            </div>
+            <div class="stat-tile stat-placeholder" id="tile-spo2">
+              <span class="stat-label">SpO₂</span>
+              <span class="stat-value" id="stat-spo2">--</span>
+              <span class="stat-note" id="note-spo2">Press Start</span>
+            </div>
+        </div>
+
+        <p class="stat-group-title">Jalan napas &amp; OSA</p>
+        <div class="stat-grid">
+            <div class="stat-tile stat-placeholder" id="tile-eff-obs">
+              <span class="stat-label">Effective Obstruction</span>
+              <span class="stat-value" id="stat-eff-obs">--</span>
+              <span class="stat-note" id="note-eff-obs">Press Start</span>
+            </div>
+            <div class="stat-tile stat-placeholder" id="tile-resistance">
+              <span class="stat-label">Airway Resistance</span>
+              <span class="stat-value" id="stat-resistance">--</span>
+              <span class="stat-note" id="note-resistance">Press Start</span>
+            </div>
+            <div class="stat-tile stat-placeholder" id="tile-events">
+              <span class="stat-label">Apnea / Hipopnea</span>
+              <span class="stat-value" id="stat-events">--</span>
+              <span class="stat-note" id="note-events">Press Start</span>
+            </div>
+            <div class="stat-tile stat-placeholder" id="tile-ahi">
+              <span class="stat-label">AHI (estimasi)</span>
+              <span class="stat-value" id="stat-ahi">--</span>
+              <span class="stat-note" id="note-ahi">Press Start</span>
+            </div>
         </div>
       </aside>
 
       <div class="lab-graph-dock" id="graph-dock">
         <header class="floating-panel-header">
           <h3>Real-Time Graphs</h3>
+          <span class="graph-legend">
+            <span class="legend-swatch legend-apnea"></span>Apnea
+            <span class="legend-swatch legend-hypopnea"></span>Hipopnea
+          </span>
           <button type="button" class="panel-collapse" data-close="graph-dock" aria-label="Collapse graphs">&minus;</button>
         </header>
-        <div class="graph-grid">
-          <div class="graph-card">
-            <p class="graph-title">Mask Pressure (Target vs Actual)</p>
-            <canvas class="graph-canvas" id="canvas-pressure" width="320" height="120"></canvas>
-            <p class="graph-empty" id="empty-pressure">Waiting for simulation engine…</p>
+        <div class="graph-layout">
+          <div class="graph-stack" aria-label="Ventilator waveforms">
+            <div class="graph-card">
+              <p class="graph-title">Pressure–Time · tekanan mask (target vs aktual)</p>
+              <canvas class="graph-canvas graph-canvas-wave" id="canvas-pressure"></canvas>
+              <p class="graph-empty" id="empty-pressure">Waiting for simulation engine…</p>
+            </div>
+            <div class="graph-card">
+              <p class="graph-title">Flow–Time · + inspirasi / − ekspirasi</p>
+              <canvas class="graph-canvas graph-canvas-wave" id="canvas-airflow"></canvas>
+              <p class="graph-empty" id="empty-airflow">Waiting for simulation engine…</p>
+            </div>
+            <div class="graph-card">
+              <p class="graph-title">Volume–Time · volume paru (spirogram)</p>
+              <canvas class="graph-canvas graph-canvas-wave" id="canvas-volume"></canvas>
+              <p class="graph-empty" id="empty-volume">Waiting for simulation engine…</p>
+            </div>
           </div>
-          <div class="graph-card">
-            <p class="graph-title">Lung Volume (Volume–Time)</p>
-            <canvas class="graph-canvas" id="canvas-volume" width="320" height="120"></canvas>
-            <p class="graph-empty" id="empty-volume">Waiting for simulation engine…</p>
-          </div>
-          <div class="graph-card">
-            <p class="graph-title">Airflow (+ inspirasi / − ekspirasi)</p>
-            <canvas class="graph-canvas" id="canvas-airflow" width="320" height="120"></canvas>
-            <p class="graph-empty" id="empty-airflow">Waiting for simulation engine…</p>
-          </div>
-          <div class="graph-card">
-            <p class="graph-title">Blower Output</p>
-            <canvas class="graph-canvas" id="canvas-blower" width="320" height="120"></canvas>
-            <p class="graph-empty" id="empty-blower">Waiting for simulation engine…</p>
+          <div class="graph-side">
+            <div class="graph-card">
+              <p class="graph-title">SpO₂ · saturasi oksigen</p>
+              <canvas class="graph-canvas graph-canvas-side" id="canvas-spo2"></canvas>
+              <p class="graph-empty" id="empty-spo2">Waiting for simulation engine…</p>
+            </div>
+            <div class="graph-card">
+              <p class="graph-title">Blower Output · sinyal kendali PID</p>
+              <canvas class="graph-canvas graph-canvas-side" id="canvas-blower"></canvas>
+              <p class="graph-empty" id="empty-blower">Waiting for simulation engine…</p>
+            </div>
           </div>
         </div>
       </div>
@@ -234,7 +272,7 @@ export function init() {
   const mount = qs('#lab-lung-mount');
   scene = new LungScene(mount, {
     interactive: true,
-    autoRotate: true,
+    autoRotate: false, // model diam; tetap bisa diputar dengan drag mouse / sentuh
     breathing: true,
     dark: true,
     compact: true,
@@ -278,6 +316,16 @@ export function init() {
     ],
     series: [{ key: 'volume', color: '#E8798A', label: 'V', width: 2 }]
   });
+  spo2Chart = new LineChart(qs('#canvas-spo2'), {
+    windowSec: CHART_WINDOW_SEC_SLOW,
+    unit: ' %',
+    yLabel: 'SpO₂ (%)',
+    decimals: 0,
+    yMin: 80,
+    yMax: 100,
+    refLines: [{ y: 90, label: '90 %', color: 'rgba(217, 74, 74, 0.8)' }],
+    series: [{ key: 'spo2', color: '#5BA4E6', width: 2 }]
+  });
   airflowChart = new LineChart(qs('#canvas-airflow'), {
     windowSec: CHART_WINDOW_SEC,
     unit: ' L/min',
@@ -287,7 +335,7 @@ export function init() {
     series: [{ key: 'flow', color: '#7DD3D0', fill: true }]
   });
   blowerChart = new LineChart(qs('#canvas-blower'), {
-    windowSec: CHART_WINDOW_SEC,
+    windowSec: CHART_WINDOW_SEC_SLOW,
     unit: '%',
     yLabel: 'Output (%)',
     yMin: 0,
@@ -317,8 +365,13 @@ function seedChartsFromHistory() {
   pressureChart?.setData(windowed.map((s) => ({ t: s.t, target: s.target, actual: s.actual })));
   airflowChart?.setData(windowed.map((s) => ({ t: s.t, flow: s.flow })));
   volumeChart?.setData(windowed.map((s) => ({ t: s.t, volume: s.volume })));
+  const slowCutoff = samples[samples.length - 1].t - CHART_WINDOW_SEC_SLOW;
+  const slow = samples.filter((s) => s.t >= slowCutoff);
+  spo2Chart?.setData(slow.map((s) => ({ t: s.t, spo2: s.spo2 })));
+  qs('#empty-spo2')?.setAttribute('hidden', '');
   qs('#empty-volume')?.setAttribute('hidden', '');
-  blowerChart?.setData(windowed.map((s) => ({ t: s.t, blower: s.blower })));
+  blowerChart?.setData(slow.map((s) => ({ t: s.t, blower: s.blower })));
+  applyEventBands(getState().osaEvents);
 
   qs('#empty-pressure')?.setAttribute('hidden', '');
   qs('#empty-airflow')?.setAttribute('hidden', '');
@@ -329,6 +382,9 @@ function onTick(sample) {
   pressureChart?.push({ t: sample.t, target: sample.target, actual: sample.actual });
   airflowChart?.push({ t: sample.t, flow: sample.flow });
   volumeChart?.push({ t: sample.t, volume: sample.volume });
+  spo2Chart?.push({ t: sample.t, spo2: sample.spo2 });
+  const emptySpo2 = qs('#empty-spo2');
+  if (emptySpo2) emptySpo2.style.display = 'none';
   const emptyVolume = qs('#empty-volume');
   if (emptyVolume) emptyVolume.style.display = 'none';
   blowerChart?.push({ t: sample.t, blower: sample.blower });
@@ -452,6 +508,7 @@ function wireRunButtons() {
     pressureChart?.clear();
     airflowChart?.clear();
     volumeChart?.clear();
+    spo2Chart?.clear();
     blowerChart?.clear();
     qs('#empty-pressure')?.removeAttribute('hidden');
     qs('#empty-airflow')?.removeAttribute('hidden');
@@ -563,15 +620,31 @@ function applyState(state) {
   setStatTile('airflow', state.airflow, (v) => `${v.toFixed(1)} <small>L/min</small>`);
   setStatTile('resistance', state.resistance, (v) => `${v.toFixed(1)} <small>cmH₂O·s/L</small>`);
   setStatTile('blower', state.blowerOutput, (v) => `${v.toFixed(0)} <small>%</small>`);
-  setStatTile('volume', state.lungVolume, (v) => `${v.toFixed(2)} <small>L</small>`);
+  setStatTile('vt', state.tidalVolume, (v) => `${Math.round(v * 1000)} <small>mL</small>`);
+  setStatTile('rr', state.measuredRR, (v) => `${v.toFixed(0)} <small>x/min</small>`);
+  setStatTile('events', state.actualPressure == null ? null : state.apneaCount + state.hypopneaCount,
+    () => `${state.apneaCount} <small>A</small> / ${state.hypopneaCount} <small>H</small>`);
+  setStatTile('ahi', state.ahi, (v) => `${v.toFixed(0)} <small>/jam · ${ahiSeverity(v)}</small>`);
+  if (state.ahi == null && state.actualPressure != null) {
+    const ahiEl = qs('#stat-ahi');
+    if (ahiEl) ahiEl.innerHTML = '<small>menunggu ≥ 60 s</small>';
+  }
+  qs('#tile-ahi')?.classList.toggle('stat-tile-warning', state.ahi != null && state.ahi >= 5);
+  qs('#tile-vt')?.classList.toggle('stat-tile-warning', state.tidalVolume != null && state.tidalVolume < 0.25);
+  applyEventBands(state.osaEvents);
   setStatTile('ve', state.minuteVentilation, (v) => `${v.toFixed(1)} <small>L/min</small>`);
   setStatTile('spo2', state.spo2, (v) => `${v.toFixed(0)} <small>%</small>`);
   setStatTile('eff-obs', state.effectiveObstruction, (v) => `${v.toFixed(0)} <small>%</small>`);
   qs('#tile-spo2')?.classList.toggle('stat-tile-warning', state.spo2 != null && state.spo2 < 90);
-  setStatTile('error', state.error, (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} <small>cmH₂O</small>`);
+  // Saat CPAP mati, loop kendali terbuka → error tidak bermakna
+  const errorValue = state.cpapOn ? state.error : null;
+  setStatTile('error', errorValue, (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} <small>cmH₂O</small>`);
 
   const errorTile = qs('#tile-error');
-  if (errorTile && state.error != null) {
+  if (errorTile && !state.cpapOn && state.actualPressure != null) {
+    qs('#stat-error').innerHTML = '<small>loop off (CPAP mati)</small>';
+    errorTile.classList.remove('stat-tile-warning');
+  } else if (errorTile && state.error != null) {
     errorTile.classList.toggle('stat-tile-warning', Math.abs(state.error) > Math.max(1, state.targetPressure * 0.15));
   }
 
@@ -602,7 +675,7 @@ function applyState(state) {
   const isRunning = state.simStatus === 'running' || state.simStatus === 'sleep';
   scene?.setBreathingRunning(isRunning);
   scene?.setRespiratoryRate(state.respRate);
-  scene?.setAutoRotate(state.simStatus !== 'sleep');
+  scene?.setAutoRotate(false); // tidak berputar otomatis selama simulasi
   scene?.setObstruction(effObs);
   scene?.setCPAPActive(state.cpapOn);
   scene?.setPressure(state.actualPressure);
@@ -643,6 +716,14 @@ function syncNumberInput(selector, value) {
   if (Number(el.value) !== value) el.value = String(value);
 }
 
+let lastBandCount = -1;
+function applyEventBands(events) {
+  const list = events ?? [];
+  if (list.length === lastBandCount) return;
+  lastBandCount = list.length;
+  [pressureChart, airflowChart, volumeChart, spo2Chart, blowerChart].forEach((c) => c?.setBands(list));
+}
+
 function setStatTile(key, value, formatter) {
   const valueEl = qs(`#stat-${key}`);
   const tileEl = qs(`#tile-${key}`);
@@ -670,6 +751,7 @@ export function dispose() {
   pressureChart?.destroy();
   airflowChart?.destroy();
   volumeChart?.destroy();
+  spo2Chart?.destroy();
   blowerChart?.destroy();
 
   scene = null;
@@ -680,6 +762,7 @@ export function dispose() {
   pressureChart = null;
   airflowChart = null;
   volumeChart = null;
+  spo2Chart = null;
   blowerChart = null;
 }
 

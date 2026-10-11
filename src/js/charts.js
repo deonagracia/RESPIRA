@@ -46,6 +46,7 @@ export class LineChart {
     this.axisLine = light ? 'rgba(16, 42, 67, 0.45)' : 'rgba(200, 230, 228, 0.45)';
     this.gridLine = light ? 'rgba(16, 42, 67, 0.08)' : 'rgba(125, 211, 208, 0.12)';
     this.data = [];
+    this.bands = []; // [{start, end, type:'apnea'|'hypopnea'}] — area kejadian OSA
 
     this._resizeObserver = new ResizeObserver(() => this._resize());
     this._resizeObserver.observe(canvas);
@@ -90,8 +91,18 @@ export class LineChart {
     this._render();
   }
 
+  /**
+   * Tandai interval kejadian OSA (gaya rekaman polisomnografi).
+   * @param {Array<{start:number, end:number, type:string}>} bands
+   */
+  setBands(bands) {
+    this.bands = Array.isArray(bands) ? bands : [];
+    this._render();
+  }
+
   clear() {
     this.data = [];
+    this.bands = [];
     this._render();
   }
 
@@ -238,6 +249,21 @@ export class LineChart {
     ctx.beginPath();
     ctx.rect(ml, mt, w, h);
     ctx.clip();
+
+    // Area kejadian apnea (merah) / hipopnea (kuning)
+    this.bands.forEach((b) => {
+      if (b.end < xMin || b.start > xMax) return;
+      const x0 = xToPx(Math.max(xMin, b.start));
+      const x1 = xToPx(Math.min(xMax, b.end));
+      const apnea = b.type === 'apnea';
+      ctx.fillStyle = apnea ? 'rgba(217, 74, 74, 0.16)' : 'rgba(244, 185, 66, 0.16)';
+      ctx.fillRect(x0, mt, Math.max(1, x1 - x0), h);
+      ctx.fillStyle = apnea ? 'rgba(217, 74, 74, 0.95)' : 'rgba(244, 185, 66, 0.95)';
+      ctx.font = 'bold 10px Inter, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      if (x1 - x0 > 14) ctx.fillText(apnea ? 'Apnea' : 'Hipopnea', x0 + 3, mt + h - 2); // label di bawah agar tidak menumpuk label TLC/nilai
+    });
 
     this.series.forEach((s) => {
       const points = [];

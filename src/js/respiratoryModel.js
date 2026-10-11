@@ -57,9 +57,9 @@ export const PHYSIOLOGY = Object.freeze({
 
   // Saturasi oksigen (model orde-1 sederhana)
   SPO2_BASE: 97,
-  SPO2_MIN: 75,
-  SPO2_TAU_DESAT: 25, // s
-  SPO2_TAU_RESAT: 8, // s
+  SPO2_MIN: 82, // target saturasi saat ventilasi nol (desaturasi tipikal OSA 4–15 %)
+  SPO2_TAU_DESAT: 14, // s
+  SPO2_TAU_RESAT: 6, // s
   VE_NORMAL: 6 // L/min, ventilasi semenit normal
 });
 
@@ -139,7 +139,7 @@ export class RespiratoryModel {
 
     // 5. Ventilasi semenit & SpO2
     const inspFlowLmin = Math.max(0, flow) * 60;
-    const veTau = 10;
+    const veTau = 5; // s, rata-rata bergerak ~1 siklus napas
     this.ve += ((inspFlowLmin - this.ve) / veTau) * dt; // rata-rata waktu aliran inspirasi = VT × RR
     const ratio = Math.min(1, this.ve / P.VE_NORMAL);
     const spo2Target = P.SPO2_MIN + (P.SPO2_BASE - P.SPO2_MIN) * Math.pow(ratio, 0.6);

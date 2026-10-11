@@ -43,6 +43,13 @@ const defaultState = Object.freeze({
   spo2: null, // %
   minuteVentilation: null, // L/min
   effectiveObstruction: null, // %, obstruksi faring efektif (setelah efek CPAP)
+  tidalVolume: null, // L, volume tidal napas terakhir
+  measuredRR: null, // napas efektif per menit
+  apneaCount: 0,
+  hypopneaCount: 0,
+  ahi: null, // kejadian per jam
+  spo2Min: null, // %
+  osaEvents: [], // [{type, start, end}]
 
   // Navigation / mode flags
   microscopicMode: false

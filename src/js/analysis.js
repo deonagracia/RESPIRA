@@ -19,6 +19,8 @@ import { qs, renderStepFooter } from './ui.js';
 import { getSamples, hasData, computeStats } from './simHistory.js';
 import { LineChart } from './charts.js';
 import { PHYSIOLOGY } from './respiratoryModel.js';
+import { getBreathSummary } from './simulationEngine.js';
+import { ahiSeverity } from './breathAnalyzer.js';
 
 const STATS = [
   { key: 'target', label: 'Target Pressure', unit: 'cmH₂O' },
@@ -26,7 +28,11 @@ const STATS = [
   { key: 'maxError', label: 'Maximum Error', unit: 'cmH₂O' },
   { key: 'settlingTime', label: 'Settling Time', unit: 's' },
   { key: 'peakBlower', label: 'Peak Blower Output', unit: '%' },
-  { key: 'avgFlow', label: 'Average Airflow', unit: 'L/min' }
+  { key: 'avgFlow', label: 'Mean |Airflow|', unit: 'L/min' },
+  { key: 'ahi', label: 'AHI', unit: '/h' },
+  { key: 'apnea', label: 'Apnea Events', unit: '' },
+  { key: 'hypopnea', label: 'Hypopnea Events', unit: '' },
+  { key: 'spo2Min', label: 'Lowest SpO₂', unit: '%' }
 ];
 
 const CHARTS = [
@@ -127,8 +133,15 @@ export function init() {
   setStat('peakBlower', stats.peakBlower, (v) => `${v.toFixed(0)} <small>%</small>`);
   setStat('avgFlow', stats.avgFlow, (v) => `${v.toFixed(1)} <small>L/min</small>`);
 
+  const osa = getBreathSummary();
+  setStat('ahi', osa.ahi, (v) => `${v.toFixed(0)} <small>/h · ${ahiSeverity(v)}</small>`, osa.ahi == null ? 'Run ≥ 60 s' : null);
+  setStat('apnea', osa.apneaCount, (v) => `${v}`);
+  setStat('hypopnea', osa.hypopneaCount, (v) => `${v}`);
+  setStat('spo2Min', osa.spo2Min, (v) => `${v.toFixed(0)} <small>%</small>`);
+
   buildCharts(samples);
-  qs('#interpretation-text').textContent = buildInterpretation(stats);
+  charts.forEach((c) => c.setBands(osa.osaEvents));
+  qs('#interpretation-text').textContent = buildInterpretation(stats, osa);
 }
 
 function setStat(key, value, formatter, overrideText) {
@@ -181,7 +194,7 @@ function buildCharts(samples) {
     theme: 'light',
     unit: ' %',
     yLabel: 'SpO₂ (%)',
-    yMin: 70,
+    yMin: 80,
     yMax: 100,
     refLines: [{ y: 90, label: 'Desaturasi < 90%', color: 'rgba(217, 74, 74, 0.8)' }],
     series: [{ key: 'spo2', color: '#5BA4E6' }]
@@ -239,8 +252,16 @@ function enNum(value, digits = 1) {
 /**
  * Builds a short, factual interpretation of the recorded run in English.
  */
-function buildInterpretation(stats) {
+function buildInterpretation(stats, osa) {
   const sentences = [];
+
+  // CPAP tidak pernah menyala → loop kendali terbuka; evaluasi PID tidak relevan
+  if (stats.peakBlower <= 0.5) {
+    sentences.push(
+      'CPAP was off for the whole recorded run, so the PID loop was open and the mask pressure stayed at atmospheric level (0 cmH₂O). The pressure-tracking metrics above therefore do not describe controller performance; this run shows the untreated (baseline) OSA condition.'
+    );
+    return appendOsa(sentences, osa).join(' ');
+  }
 
   const finalError = stats.finalTarget - stats.finalActual;
   const absFinalError = Math.abs(finalError);
@@ -249,7 +270,8 @@ function buildInterpretation(stats) {
     `The actual pressure at the end of the simulation was ${enNum(stats.finalActual)} cmH₂O against a target of ${enNum(stats.finalTarget)} cmH₂O.`
   );
 
-  if (absFinalError <= Math.max(0.3, stats.finalTarget * 0.05)) {
+  // Toleransi ±1 cmH2O (atau 10 %) — setara akurasi alat CPAP komersial
+  if (absFinalError <= Math.max(1, stats.finalTarget * 0.1)) {
     sentences.push(
       `A final error of ${enNum(absFinalError, 2)} cmH₂O indicates that the pressure reached the target reasonably well.`
     );
@@ -293,7 +315,34 @@ function buildInterpretation(stats) {
     );
   }
 
-  return sentences.join(' ');
+  return appendOsa(sentences, osa).join(' ');
+}
+
+function appendOsa(sentences, osa) {
+  if (osa) {
+    const total = osa.apneaCount + osa.hypopneaCount;
+    if (osa.ahi != null) {
+      sentences.push(
+        `Breath analysis detected ${osa.apneaCount} apnea and ${osa.hypopneaCount} hypopnea event(s), giving an AHI of ${enNum(osa.ahi, 0)} events/hour (${ahiSeverityEn(osa.ahi)} by AASM criteria: <5 normal, 5–15 mild, 15–30 moderate, ≥30 severe).`
+      );
+    }
+    if (osa.spo2Min != null) {
+      sentences.push(
+        osa.spo2Min < 90
+          ? `Oxygen saturation fell to ${enNum(osa.spo2Min, 0)}%, below the 90% clinical threshold, reflecting the ventilation lost during obstructive events.`
+          : `Oxygen saturation stayed at or above ${enNum(osa.spo2Min, 0)}% throughout the run.`
+      );
+    }
+    if (total === 0 && osa.ahi != null) {
+      sentences.push('No obstructive events met the ≥10 s criterion, meaning the upper airway stayed sufficiently open (or was kept open by CPAP).');
+    }
+    sentences.push('Note: AHI is extrapolated from a short simulated run; clinical AHI is measured over a full night of sleep.');
+  }
+  return sentences;
+}
+
+function ahiSeverityEn(ahi) {
+  return { Normal: 'normal', Ringan: 'mild OSA', Sedang: 'moderate OSA', Berat: 'severe OSA' }[ahiSeverity(ahi)];
 }
 
 export function dispose() {
