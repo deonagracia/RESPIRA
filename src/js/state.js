@@ -39,6 +39,10 @@ const defaultState = Object.freeze({
   resistance: null, // cmH2O·s/L
   blowerOutput: null, // 0..100
   error: null, // cmH2O (target - actual)
+  lungVolume: null, // L, volume paru absolut
+  spo2: null, // %
+  minuteVentilation: null, // L/min
+  effectiveObstruction: null, // %, obstruksi faring efektif (setelah efek CPAP)
 
   // Navigation / mode flags
   microscopicMode: false

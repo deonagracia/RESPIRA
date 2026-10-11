@@ -33,7 +33,7 @@ import { PIDController } from './pidController.js';
 import * as simHistory from './simHistory.js';
 
 const FIXED_DT = 0.02; // seconds — physics integration step (50 Hz)
-const PUBLISH_INTERVAL = 0.08; // seconds — telemetry/history/chart publish rate (~12.5 Hz)
+const PUBLISH_INTERVAL = 0.04; // seconds — 25 Hz, cukup rapat agar puncak aliran tidak terpotong
 const MAX_FRAME_DT = 0.25; // seconds — clamp huge gaps (tab switches, GC pauses)
 const MAX_STEPS_PER_FRAME = 200; // safety cap so a long stall can't freeze the tab
 
@@ -181,7 +181,15 @@ function tickPhysics(dt, status) {
     flow: result.flow,
     blower: blowerOutput,
     resistance: result.resistance,
-    obstruction
+    obstruction,
+    volume: result.volume, // L absolut — untuk grafik volume–waktu (spirogram)
+    tidalDelta: result.tidalDelta, // L di atas FRC — untuk animasi paru 3D
+    patency: result.patency, // 0..1 bukaan faring
+    effectiveObstruction: result.effectiveObstruction, // % obstruksi efektif setelah CPAP
+    pcrit: result.pcrit,
+    pmus: result.pmus,
+    spo2: result.spo2,
+    ve: result.ve
   };
 }
 
@@ -199,7 +207,11 @@ function publishTelemetry() {
     airflow: lastTick.flow,
     resistance: lastTick.resistance,
     blowerOutput: lastTick.blower,
-    error: lastTick.error
+    error: lastTick.error,
+    lungVolume: lastTick.volume,
+    spo2: lastTick.spo2,
+    minuteVentilation: lastTick.ve,
+    effectiveObstruction: lastTick.effectiveObstruction
   });
   
   simHistory.recordSample({ ...lastTick });

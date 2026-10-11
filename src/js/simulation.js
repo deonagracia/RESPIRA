@@ -9,10 +9,12 @@ import { getState, setState, resetState, subscribe } from './state.js';
 import { emit, on } from './bus.js';
 import { navigate } from './navigation.js';
 import { LineChart } from './charts.js';
+import { PHYSIOLOGY } from './respiratoryModel.js';
 import { resetRun } from './simulationEngine.js';
 import { getSamples } from './simHistory.js';
 
-const CHART_WINDOW_SEC = 15; // seconds visible on the live rolling charts
+const LUNG_ANIM_RANGE_L = 1.5; // L di atas FRC yang dipetakan ke ekspansi 3D penuh
+const CHART_WINDOW_SEC = 20; // seconds visible on the live rolling charts
 
 let scene = null;
 let airwayPreview = null;
@@ -22,6 +24,7 @@ let fullscreenHandler = null;
 
 let pressureChart = null;
 let airflowChart = null;
+let volumeChart = null;
 let blowerChart = null;
 
 // Memori untuk menghaluskan dinamika paru-paru & timer
@@ -84,7 +87,7 @@ export function render() {
 
         <div class="control-group">
           <label class="control-label" for="ctl-obstruction">
-            Airway Obstruction
+            OSA Severity (Airway Collapsibility)
             <span class="control-value" id="val-obstruction">20%</span>
           </label>
           <input type="range" id="ctl-obstruction" min="0" max="100" step="1" value="20" />
@@ -170,6 +173,26 @@ export function render() {
             <span class="stat-value" id="stat-error">--</span>
             <span class="stat-note" id="note-error">Press Start</span>
           </div>
+          <div class="stat-tile stat-placeholder" id="tile-volume">
+            <span class="stat-label">Lung Volume</span>
+            <span class="stat-value" id="stat-volume">--</span>
+            <span class="stat-note" id="note-volume">Press Start</span>
+          </div>
+          <div class="stat-tile stat-placeholder" id="tile-ve">
+            <span class="stat-label">Minute Ventilation</span>
+            <span class="stat-value" id="stat-ve">--</span>
+            <span class="stat-note" id="note-ve">Press Start</span>
+          </div>
+          <div class="stat-tile stat-placeholder" id="tile-spo2">
+            <span class="stat-label">SpO₂</span>
+            <span class="stat-value" id="stat-spo2">--</span>
+            <span class="stat-note" id="note-spo2">Press Start</span>
+          </div>
+          <div class="stat-tile stat-placeholder" id="tile-eff-obs">
+            <span class="stat-label">Effective Obstruction</span>
+            <span class="stat-value" id="stat-eff-obs">--</span>
+            <span class="stat-note" id="note-eff-obs">Press Start</span>
+          </div>
         </div>
       </aside>
 
@@ -180,12 +203,17 @@ export function render() {
         </header>
         <div class="graph-grid">
           <div class="graph-card">
-            <p class="graph-title">Pressure Response</p>
+            <p class="graph-title">Mask Pressure (Target vs Actual)</p>
             <canvas class="graph-canvas" id="canvas-pressure" width="320" height="120"></canvas>
             <p class="graph-empty" id="empty-pressure">Waiting for simulation engine…</p>
           </div>
           <div class="graph-card">
-            <p class="graph-title">Airflow</p>
+            <p class="graph-title">Lung Volume (Volume–Time)</p>
+            <canvas class="graph-canvas" id="canvas-volume" width="320" height="120"></canvas>
+            <p class="graph-empty" id="empty-volume">Waiting for simulation engine…</p>
+          </div>
+          <div class="graph-card">
+            <p class="graph-title">Airflow (+ inspirasi / − ekspirasi)</p>
             <canvas class="graph-canvas" id="canvas-airflow" width="320" height="120"></canvas>
             <p class="graph-empty" id="empty-airflow">Waiting for simulation engine…</p>
           </div>
@@ -227,20 +255,41 @@ export function init() {
 
   pressureChart = new LineChart(qs('#canvas-pressure'), {
     windowSec: CHART_WINDOW_SEC,
-    unit: '',
+    unit: ' cmH₂O',
+    yLabel: 'cmH₂O',
+    yMin: -2,
+    yMax: 20,
     series: [
       { key: 'target', color: '#7DD3D0', dashed: true, label: 'Target', width: 1.6 },
       { key: 'actual', color: '#0F9D9A', label: 'Actual', fill: true }
     ]
   });
+  volumeChart = new LineChart(qs('#canvas-volume'), {
+    windowSec: CHART_WINDOW_SEC,
+    unit: ' L',
+    yLabel: 'Volume (L)',
+    decimals: 2,
+    yMin: 0,
+    yMax: 6.5,
+    refLines: [
+      { y: PHYSIOLOGY.TLC, label: 'TLC' },
+      { y: PHYSIOLOGY.FRC, label: 'FRC' },
+      { y: PHYSIOLOGY.RV, label: 'RV' }
+    ],
+    series: [{ key: 'volume', color: '#E8798A', label: 'V', width: 2 }]
+  });
   airflowChart = new LineChart(qs('#canvas-airflow'), {
     windowSec: CHART_WINDOW_SEC,
     unit: ' L/min',
+    yLabel: 'L/min',
+    yMin: -80,
+    yMax: 80,
     series: [{ key: 'flow', color: '#7DD3D0', fill: true }]
   });
   blowerChart = new LineChart(qs('#canvas-blower'), {
     windowSec: CHART_WINDOW_SEC,
     unit: '%',
+    yLabel: 'Output (%)',
     yMin: 0,
     yMax: 100,
     series: [{ key: 'blower', color: '#F4B942', fill: true }]
@@ -267,6 +316,8 @@ function seedChartsFromHistory() {
 
   pressureChart?.setData(windowed.map((s) => ({ t: s.t, target: s.target, actual: s.actual })));
   airflowChart?.setData(windowed.map((s) => ({ t: s.t, flow: s.flow })));
+  volumeChart?.setData(windowed.map((s) => ({ t: s.t, volume: s.volume })));
+  qs('#empty-volume')?.setAttribute('hidden', '');
   blowerChart?.setData(windowed.map((s) => ({ t: s.t, blower: s.blower })));
 
   qs('#empty-pressure')?.setAttribute('hidden', '');
@@ -277,6 +328,9 @@ function seedChartsFromHistory() {
 function onTick(sample) {
   pressureChart?.push({ t: sample.t, target: sample.target, actual: sample.actual });
   airflowChart?.push({ t: sample.t, flow: sample.flow });
+  volumeChart?.push({ t: sample.t, volume: sample.volume });
+  const emptyVolume = qs('#empty-volume');
+  if (emptyVolume) emptyVolume.style.display = 'none';
   blowerChart?.push({ t: sample.t, blower: sample.blower });
 
   const emptyPressure = qs('#empty-pressure');
@@ -289,49 +343,14 @@ function onTick(sample) {
   if (emptyBlower) emptyBlower.style.display = 'none';
 
   // --- LUNG DYNAMICS LOGIC ---
-  if (scene) {
+  // Ekspansi paru 3D digerakkan LANGSUNG oleh volume hasil model (bukan
+  // aturan if/else berbasis threshold obstruksi). Jadi bentuk gerak paru
+  // identik dengan grafik volume–waktu: apnea → paru diam, CPAP → paru
+  // kembali mengembang-kempis dengan baseline sedikit lebih tinggi (EELV naik).
+  if (scene && typeof sample.volume === 'number') {
     scene._liveMode = true;
-
-    const dt = Math.min(sample.t - lastTime, 0.1); 
-    lastTime = sample.t;
-    
-    const obs = getState().obstruction;
-    const cpapOn = getState().cpapOn; // Status CPAP untuk koreksi visual paru-paru
-    const rr = getState().respRate;
-    const freq = rr / 60; 
-
-    currentBreathPhase += freq * dt;
-    if (currentBreathPhase > 1) currentBreathPhase -= 1;
-
-    let targetExpansion = 0;
-    // Paru-paru hanya berhenti total jika obstruksi >= 70% DAN CPAP dalam keadaan OFF
-    if (obs >= 70 && !cpapOn) {
-      targetExpansion = 0.0; 
-    }
-    else if (obs >= 25 || (obs >= 70 && cpapOn)) {
-      if (currentBreathPhase < 0.2) {
-        targetExpansion = currentBreathPhase / 0.2; 
-      } else {
-        targetExpansion = 1.0 - ((currentBreathPhase - 0.2) / 0.8); 
-      }
-    }
-    else {
-      if (currentBreathPhase < 0.4) {
-        targetExpansion = currentBreathPhase / 0.4;
-      } else {
-        targetExpansion = 1.0 - ((currentBreathPhase - 0.4) / 0.6);
-      }
-    }
-
-    let transitionSpeed = 8.0; 
-    if (obs >= 70 && !cpapOn) {
-       transitionSpeed = 2.0; 
-    } else if (obs >= 25 || (obs >= 70 && cpapOn)) {
-       transitionSpeed = 4.0; 
-    }
-
-    smoothExpansion += (targetExpansion - smoothExpansion) * (dt * transitionSpeed);
-    scene.setBreathingPhase(smoothExpansion);
+    const expansion = (sample.volume - PHYSIOLOGY.FRC) / LUNG_ANIM_RANGE_L;
+    scene.setBreathingPhase(Math.min(1, Math.max(0, expansion)));
   }
 
   // --- TIMER LOGIC ---
@@ -432,6 +451,7 @@ function wireRunButtons() {
     resetRun();
     pressureChart?.clear();
     airflowChart?.clear();
+    volumeChart?.clear();
     blowerChart?.clear();
     qs('#empty-pressure')?.removeAttribute('hidden');
     qs('#empty-airflow')?.removeAttribute('hidden');
@@ -543,6 +563,11 @@ function applyState(state) {
   setStatTile('airflow', state.airflow, (v) => `${v.toFixed(1)} <small>L/min</small>`);
   setStatTile('resistance', state.resistance, (v) => `${v.toFixed(1)} <small>cmH₂O·s/L</small>`);
   setStatTile('blower', state.blowerOutput, (v) => `${v.toFixed(0)} <small>%</small>`);
+  setStatTile('volume', state.lungVolume, (v) => `${v.toFixed(2)} <small>L</small>`);
+  setStatTile('ve', state.minuteVentilation, (v) => `${v.toFixed(1)} <small>L/min</small>`);
+  setStatTile('spo2', state.spo2, (v) => `${v.toFixed(0)} <small>%</small>`);
+  setStatTile('eff-obs', state.effectiveObstruction, (v) => `${v.toFixed(0)} <small>%</small>`);
+  qs('#tile-spo2')?.classList.toggle('stat-tile-warning', state.spo2 != null && state.spo2 < 90);
   setStatTile('error', state.error, (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} <small>cmH₂O</small>`);
 
   const errorTile = qs('#tile-error');
@@ -569,14 +594,16 @@ function applyState(state) {
   sleepBtn?.classList.toggle('active', isSleeping);
   if (sleepBtn) sleepBtn.textContent = isSleeping ? '🌙 End Sleep Simulation' : '🌙 Sleep Simulation';
 
-  airwayPreview?.setObstruction(state.obstruction);
+  // Tampilkan obstruksi EFEKTIF (setelah efek splint CPAP), bukan nilai slider mentah
+  const effObs = state.effectiveObstruction ?? state.obstruction;
+  airwayPreview?.setObstruction(effObs);
   airwayPreview?.setFlowSpeed(state.airflow != null ? 0.3 + Math.min(1, Math.abs(state.airflow) / 30) : 1);
 
   const isRunning = state.simStatus === 'running' || state.simStatus === 'sleep';
   scene?.setBreathingRunning(isRunning);
   scene?.setRespiratoryRate(state.respRate);
   scene?.setAutoRotate(state.simStatus !== 'sleep');
-  scene?.setObstruction(state.obstruction);
+  scene?.setObstruction(effObs);
   scene?.setCPAPActive(state.cpapOn);
   scene?.setPressure(state.actualPressure);
   scene?.setAirflow(state.airflow);
@@ -642,6 +669,7 @@ export function dispose() {
   airwayPreview?.dispose();
   pressureChart?.destroy();
   airflowChart?.destroy();
+  volumeChart?.destroy();
   blowerChart?.destroy();
 
   scene = null;
@@ -651,6 +679,7 @@ export function dispose() {
   fullscreenHandler = null;
   pressureChart = null;
   airflowChart = null;
+  volumeChart = null;
   blowerChart = null;
 }
 

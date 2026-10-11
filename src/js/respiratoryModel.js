@@ -1,67 +1,90 @@
 /**
- * respiratoryModel.js — Phase 2
+ * respiratoryModel.js — Phase 3 (physiological rewrite)
  * -----------------------------------------------------------------------
- * A deliberately simple, single-compartment RC (resistance/compliance)
- * model of the airway + lung, driven by the CPAP blower and by the
- * patient's own spontaneous breathing effort. It is the "plant" the PID
- * controller in pidController.js tries to control.
+ * Plant model untuk OSA + CPAP, berbasis persamaan gerak sistem respirasi
+ * (equation of motion) + upper airway sebagai Starling resistor.
  *
- * Equation of motion (electrical-circuit analogy: R = resistor,
- * C = capacitor, driving pressure = voltage source):
+ *   Pao + Pmus = R_total·Q + E·ΔV            (equation of motion)
+ *   Palv       = E·ΔV − Pmus... ditulis ulang  →  Palv = ΔV/C + Pmus
+ *   Q          = (Pmask − Palv) / (R_aw + R_ua + R_circuit)
+ *   dV/dt      = Q
  *
- *   flow      Q(t) = (drive(t) - P(t)) / R(t)      [L/s]
- *   pressure  dP/dt = Q(t) / C                      [cmH2O/s]
+ * Upper airway (faring) = Starling resistor:
+ *   luas lumen A = sigmoid((P_faring − Pcrit) / k)
+ *   R_ua         = R_UA_OPEN / A²
+ *   Pcrit naik seiring derajat OSA (slider "obstruction"):
+ *     0 %  → Pcrit = −15 cmH2O (normal, jalan napas tetap terbuka)
+ *     100% → Pcrit = +5  cmH2O (OSA berat, kolaps saat tidur)
+ *   → CPAP menaikkan tekanan faring di atas Pcrit sehingga jalan napas
+ *     "dibidai" (pneumatic splint) dan aliran kembali normal. Inilah
+ *     mekanisme terapi CPAP yang sebenarnya.
  *
- * where:
- *   - drive(t)  = CPAP blower contribution + spontaneous patient effort
- *   - P(t)      = "Actual Pressure" at the airway/mask (the controlled variable)
- *   - R(t)      = "Airway Resistance", rises sharply as obstruction -> 100%
- *   - C         = lung/circuit compliance (held constant in Phase 2)
+ * Mask/blower: tekanan mask = tekanan blower − R_circuit·Q, sehingga
+ * napas pasien menjadi gangguan (disturbance) yang harus dilawan PID.
  *
- * This is intentionally NOT a clinically validated respiratory model — it
- * is tuned to *look and behave* like a textbook control-systems plant
- * (first-order lag with a nonlinear, disturbance-driven time constant) so
- * the PID controller has something meaningful to fight against, which is
- * the actual learning objective of this simulator (Section 12 of the
- * project brief: natural vs artificial feedback control).
+ * Volume paru dilaporkan absolut (L) agar grafik volume–waktu bisa
+ * dibandingkan dengan spirogram standar (RV, ERV, FRC, VT, IRV, TLC).
+ *
+ * Model edukatif — parameter dipilih agar nilai berada di rentang
+ * fisiologis orang dewasa, bukan model klinis tervalidasi.
  */
 
 export const PHYSIOLOGY = Object.freeze({
-  R_BASE: 5, // cmH2O·s/L — airway resistance with no obstruction
-  R_OBSTRUCTED_MAX: 45, // additional resistance contributed at 100% obstruction
-  COMPLIANCE: 0.3, // L/cmH2O — lung/circuit compliance (constant in Phase 2)
-  BLOWER_MAX_PRESSURE: 25, // cmH2O — driving pressure at 100% blower output
-  PATIENT_EFFORT_AMPLITUDE: 2.2 // cmH2O — spontaneous inspiratory effort pulse height
+  // Volume paru (L) — sesuai spirogram standar dewasa
+  RV: 1.2,
+  FRC: 2.3, // volume relaksasi (end-expiratory) tanpa CPAP
+  TLC: 6.0,
+
+  // Mekanika
+  COMPLIANCE: 0.1, // L/cmH2O, compliance sistem respirasi total
+  R_AW: 2.0, // cmH2O·s/L, resistansi saluran napas bawah
+  R_UA_OPEN: 1.0, // cmH2O·s/L, resistansi faring saat terbuka penuh
+  R_CIRCUIT: 2.0, // cmH2O·s/L, selang + mask (hanya saat CPAP terpasang)
+
+  // Starling resistor
+  PCRIT_NORMAL: -15,
+  PCRIT_SEVERE: 5,
+  COLLAPSE_SLOPE: 1.8, // cmH2O, kecuraman transisi buka/tutup
+  A_MIN: 0.03, // luas lumen minimum (oklusi hampir total)
+
+  // Usaha napas (otot inspirasi)
+  PMUS_MAX: 6.5, // cmH2O, amplitudo puncak tekanan otot
+  TI_FRACTION: 0.4, // Ti / Ttot (I:E ≈ 1:1.5)
+
+  // Blower
+  BLOWER_MAX_PRESSURE: 25, // cmH2O pada output 100 %
+  BLOWER_TAU: 0.08, // s, konstanta waktu motor blower
+
+  // Saturasi oksigen (model orde-1 sederhana)
+  SPO2_BASE: 97,
+  SPO2_MIN: 75,
+  SPO2_TAU_DESAT: 25, // s
+  SPO2_TAU_RESAT: 8, // s
+  VE_NORMAL: 6 // L/min, ventilasi semenit normal
 });
 
-/**
- * Airway resistance as a function of obstruction percentage.
- * Nonlinear (quadratic) on purpose: resistance stays fairly manageable
- * until obstruction gets severe, then rises sharply — closer to how a
- * real collapsing upper airway behaves than a straight line would be.
- * @param {number} obstructionPct 0..100
- * @returns {number} resistance in cmH2O·s/L
- */
-export function resistanceFromObstruction(obstructionPct) {
-  const frac = Math.min(100, Math.max(0, obstructionPct)) / 100;
-  return PHYSIOLOGY.R_BASE + PHYSIOLOGY.R_OBSTRUCTED_MAX * frac * frac;
+/** Pcrit (cmH2O) sebagai fungsi derajat obstruksi 0..100 %. */
+export function pcritFromObstruction(obstructionPct) {
+  const f = Math.min(100, Math.max(0, obstructionPct)) / 100;
+  return PHYSIOLOGY.PCRIT_NORMAL + (PHYSIOLOGY.PCRIT_SEVERE - PHYSIOLOGY.PCRIT_NORMAL) * f;
+}
+
+/** Fraksi luas lumen faring (0..1) dari tekanan faring dan Pcrit. */
+export function airwayPatency(pPharynx, pcrit) {
+  const a = 1 / (1 + Math.exp(-(pPharynx - pcrit) / PHYSIOLOGY.COLLAPSE_SLOPE));
+  return Math.max(PHYSIOLOGY.A_MIN, a);
 }
 
 /**
- * The spontaneous patient respiratory effort, modeled as a half-sine
- * inspiratory pulse repeating at the configured respiratory rate. It is
- * always present (representing the patient's own drive to breathe),
- * independent of whether CPAP is on — this is what still produces a
- * (very limited) flow signal during a simulated obstructive event with
- * CPAP off, which is the whole point of the OSA case study.
- * @param {number} simTimeSec
- * @param {number} respRateBpm
- * @returns {number} cmH2O
+ * Tekanan otot inspirasi Pmus(t) (negatif saat inspirasi).
+ * Inspirasi: setengah-sinus. Ekspirasi: relaksasi eksponensial cepat.
  */
 export function patientEffort(simTimeSec, respRateBpm) {
-  const freqHz = Math.max(0.05, respRateBpm / 60);
-  const phase = (simTimeSec * freqHz) % 1;
-  return Math.max(0, Math.sin(phase * Math.PI * 2)) * PHYSIOLOGY.PATIENT_EFFORT_AMPLITUDE;
+  const T = 60 / Math.max(3, respRateBpm);
+  const Ti = T * PHYSIOLOGY.TI_FRACTION;
+  const t = simTimeSec % T;
+  if (t < Ti) return -PHYSIOLOGY.PMUS_MAX * Math.sin((Math.PI * t) / Ti);
+  return 0; // ekspirasi pasif (recoil elastik)
 }
 
 export class RespiratoryModel {
@@ -70,46 +93,77 @@ export class RespiratoryModel {
   }
 
   reset() {
-    this.pressure = 0; // cmH2O, "Actual Pressure"
-    this.flow = 0; // L/s, internal working unit
+    this.dV = 0; // L, volume di atas volume relaksasi (FRC)
+    this.blowerPressure = 0; // cmH2O, tekanan keluaran blower (setelah lag motor)
+    this.pressure = 0; // cmH2O, tekanan mask (variabel terkontrol)
+    this.flow = 0; // L/s, + = inspirasi
+    this.patency = 1;
+    this.spo2 = PHYSIOLOGY.SPO2_BASE;
+    this.ve = PHYSIOLOGY.VE_NORMAL; // L/min, ventilasi semenit (rata-rata bergerak)
   }
 
   /**
-   * Advance the model by one fixed timestep.
-   * @param {number} dt - seconds
-   * @param {object} params
-   * @param {number} params.obstruction - 0..100
-   * @param {number} params.respRate - breaths per minute
-   * @param {number} params.simTime - seconds elapsed in the current run
-   * @param {number} params.blowerOutput - 0..100 (from the PID controller, or 0 if CPAP is off)
-   * @param {boolean} params.cpapOn
-   * @returns {{pressure:number, flow:number, resistance:number, drive:number, effort:number}}
-   *   pressure in cmH2O, flow in L/min (converted for display), resistance in cmH2O·s/L
+   * @param {number} dt detik
+   * @param {{obstruction:number, respRate:number, simTime:number, blowerOutput:number, cpapOn:boolean}} p
    */
   step(dt, { obstruction, respRate, simTime, blowerOutput, cpapOn }) {
-    const resistance = resistanceFromObstruction(obstruction);
-    const effort = patientEffort(simTime, respRate);
-    const blowerContribution = cpapOn ? (blowerOutput / 100) * PHYSIOLOGY.BLOWER_MAX_PRESSURE : 0;
-    const drive = blowerContribution + effort;
+    const P = PHYSIOLOGY;
 
-    const flow = (drive - this.pressure) / resistance; // L/s
-    this.pressure += (flow / PHYSIOLOGY.COMPLIANCE) * dt;
+    // 1. Blower (orde-1)
+    const blowerCmd = cpapOn ? (blowerOutput / 100) * P.BLOWER_MAX_PRESSURE : 0;
+    this.blowerPressure += ((blowerCmd - this.blowerPressure) / P.BLOWER_TAU) * dt;
+    const rCircuit = cpapOn ? P.R_CIRCUIT : 0;
+    const pSource = cpapOn ? this.blowerPressure : 0;
 
-    // Numerical safety net only (not a physiological clamp) — keeps the
-    // simulation stable if an extreme gain combination is entered.
-    if (!Number.isFinite(this.pressure)) this.pressure = 0;
-    this.pressure = Math.max(-30, Math.min(60, this.pressure));
+    // 2. Usaha napas & tekanan alveolar
+    const pmus = patientEffort(simTime, respRate);
+    const palv = this.dV / P.COMPLIANCE + pmus;
 
+    // 3. Starling resistor — tekanan faring dari langkah sebelumnya
+    const pcrit = pcritFromObstruction(obstruction);
+    const pPharynx = this.pressure - this.flow * P.R_UA_OPEN * 0.5;
+    this.patency = airwayPatency(pPharynx, pcrit);
+    const rUa = P.R_UA_OPEN / (this.patency * this.patency);
+    const rTotal = P.R_AW + rUa + rCircuit;
+
+    // 4. Aliran & volume
+    const flow = (pSource - palv) / rTotal;
     this.flow = flow;
+    this.pressure = pSource - rCircuit * flow; // tekanan mask
+    this.dV += flow * dt;
+
+    // Batas fisiologis volume (RV..TLC)
+    const vAbs = P.FRC + this.dV;
+    if (vAbs < P.RV) this.dV = P.RV - P.FRC;
+    if (vAbs > P.TLC) this.dV = P.TLC - P.FRC;
+
+    // 5. Ventilasi semenit & SpO2
+    const inspFlowLmin = Math.max(0, flow) * 60;
+    const veTau = 10;
+    this.ve += ((inspFlowLmin - this.ve) / veTau) * dt; // rata-rata waktu aliran inspirasi = VT × RR
+    const ratio = Math.min(1, this.ve / P.VE_NORMAL);
+    const spo2Target = P.SPO2_MIN + (P.SPO2_BASE - P.SPO2_MIN) * Math.pow(ratio, 0.6);
+    const tau = spo2Target < this.spo2 ? P.SPO2_TAU_DESAT : P.SPO2_TAU_RESAT;
+    this.spo2 += ((spo2Target - this.spo2) / tau) * dt;
+
+    if (!Number.isFinite(this.pressure)) this.pressure = 0;
+    if (!Number.isFinite(this.dV)) this.dV = 0;
 
     return {
-      pressure: this.pressure,
-      flow: flow * 60, // L/min, more familiar unit for display
-      resistance,
-      drive,
-      effort
+      pressure: this.pressure, // cmH2O (mask)
+      flow: flow * 60, // L/min
+      volume: P.FRC + this.dV, // L, absolut
+      tidalDelta: this.dV, // L, di atas FRC relaksasi
+      resistance: rTotal - rCircuit, // cmH2O·s/L (pasien)
+      patency: this.patency, // 0..1
+      effectiveObstruction: (1 - this.patency) * 100, // %
+      pcrit,
+      pmus,
+      palv,
+      spo2: this.spo2,
+      ve: this.ve
     };
   }
 }
 
-export default { PHYSIOLOGY, resistanceFromObstruction, patientEffort, RespiratoryModel };
+export default { PHYSIOLOGY, pcritFromObstruction, airwayPatency, patientEffort, RespiratoryModel };

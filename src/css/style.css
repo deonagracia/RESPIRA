@@ -1607,12 +1607,10 @@ input[type='range']:disabled {
 
 .graph-canvas {
   width: 100%;
-  height: auto;
+  height: 160px; /* tinggi tetap agar sumbu & label terbaca */
   display: block;
   border-radius: var(--radius-sm);
-  background:
-    linear-gradient(rgba(125, 211, 208, 0.08) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(125, 211, 208, 0.08) 1px, transparent 1px);
+  background: rgba(8, 24, 36, 0.35); /* grid kini digambar oleh charts.js mengikuti skala sumbu */
   background-size: 24px 24px;
   opacity: 0.9;
 }
@@ -1646,10 +1644,8 @@ input[type='range']:disabled {
 }
 
 .analysis-graph-grid .graph-canvas {
-  background:
-    linear-gradient(rgba(16, 42, 67, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(16, 42, 67, 0.06) 1px, transparent 1px);
-  background-size: 24px 24px;
+  height: 200px;
+  background: rgba(16, 42, 67, 0.03);
 }
 
 /* =========================================================================

@@ -83,7 +83,9 @@ export function computeStats() {
 
   const avgFlow = sumAbsFlow / samples.length;
   const finalTarget = samples[samples.length - 1].target;
-  const tolerance = Math.max(0.3, finalTarget * 0.05);
+  // Napas pasien membuat tekanan mask berosilasi ±~1 cmH2O (wajar pada CPAP nyata),
+  // jadi toleransi settling disamakan dengan akurasi alat CPAP komersial (±1 cmH2O).
+  const tolerance = Math.max(1.0, finalTarget * 0.1);
 
   // Settling time: walk back from the end to find the last moment the
   // error was outside the tolerance band. Everything after that point

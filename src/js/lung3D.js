@@ -1063,12 +1063,12 @@ this.anatomyAnchors = {
     this._lastAppliedExpansion = THREE.MathUtils.clamp(value, 0, 1);
     
     // UBAH 0.09 (9%) MENJADI 0.5 (50%) agar gerakannya sangat ekstrim/terlihat
-    const scale = 1 + this._lastAppliedExpansion * 0.15; 
+    const scale = 1 + this._lastAppliedExpansion * 0.22; // ekspansi lateral/AP
     
     this.allLobes?.forEach((lobe) => {
       const base = lobe.userData.baseScale;
       // UBAH JUGA 0.12 MENJADI 0.6 (60%)
-      lobe.scale.set(base.x * scale, base.y * (1 + this._lastAppliedExpansion * 0.2), base.z * scale);
+      lobe.scale.set(base.x * scale, base.y * (1 + this._lastAppliedExpansion * 0.3), base.z * scale);
     });
   }
 
@@ -1206,8 +1206,8 @@ this.anatomyAnchors = {
 
     const dt = Math.min(0.1, this._clock.getDelta());
 
-   // TAMBAHKAN BARIS INI UNTUK MEMAKSA PARU-PARU BERNAPAS TERUS
-    this._breathingActive = true; 
+    // (dihapus: baris yang memaksa _breathingActive = true setiap frame
+    //  membuat tombol Pause tidak bisa membekukan paru)
 
     if (this.options.autoRotate && !this._camAnim && this.lungGroup) {
       this._rotationPivot.rotation.y += dt * 0.16;
@@ -1218,10 +1218,9 @@ this.anatomyAnchors = {
       
       // JIKA SIMULASI BERJALAN (LIVE MODE)
       if (this._liveMode) {
-          phase = this._livePhase; // Gunakan nilai langsung dari engine
-          
-          // Easing untuk memperhalus gerakan yang didapat dari engine
-          const eased = phase < 0.5 ? Math.pow(phase * 2, 0.85) / 2 : 1 - Math.pow((1 - phase) * 2, 1.15) / 2;
+          phase = this._livePhase; // volume ternormalisasi dari model
+          // Tanpa easing: bentuk gerak harus sama persis dengan kurva volume.
+          const eased = phase;
           this._breathDirection = eased >= this._lastEasedPhase ? 1 : -1;
           this._lastEasedPhase = eased;
           

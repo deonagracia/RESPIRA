@@ -18,6 +18,7 @@
 import { qs, renderStepFooter } from './ui.js';
 import { getSamples, hasData, computeStats } from './simHistory.js';
 import { LineChart } from './charts.js';
+import { PHYSIOLOGY } from './respiratoryModel.js';
 
 const STATS = [
   { key: 'target', label: 'Target Pressure', unit: 'cmH₂O' },
@@ -30,7 +31,9 @@ const STATS = [
 
 const CHARTS = [
   { id: 'pressure', title: 'Pressure Response' },
+  { id: 'volume', title: 'Lung Volume (Volume–Time)' },
   { id: 'airflow', title: 'Airflow' },
+  { id: 'spo2', title: 'SpO₂' },
   { id: 'blower', title: 'Blower Output' },
   { id: 'obstruction', title: 'Obstruction Timeline' }
 ];
@@ -148,7 +151,9 @@ function setStat(key, value, formatter, overrideText) {
 
 function buildCharts(samples) {
   const pressure = new LineChart(qs('#a-canvas-pressure'), {
-    unit: '',
+    theme: 'light',
+    unit: ' cmH₂O',
+    yLabel: 'cmH₂O',
     series: [
       { key: 'target', color: '#7DD3D0', dashed: true, label: 'Target', width: 1.6 },
       { key: 'actual', color: '#0F9D9A', label: 'Actual', fill: true }
@@ -156,14 +161,45 @@ function buildCharts(samples) {
   });
   pressure.setData(samples.map((s) => ({ t: s.t, target: s.target, actual: s.actual })));
 
+  const volume = new LineChart(qs('#a-canvas-volume'), {
+    theme: 'light',
+    unit: ' L',
+    yLabel: 'Volume (L)',
+    decimals: 2,
+    yMin: 0,
+    yMax: 6.5,
+    refLines: [
+      { y: PHYSIOLOGY.TLC, label: 'TLC' },
+      { y: PHYSIOLOGY.FRC, label: 'FRC' },
+      { y: PHYSIOLOGY.RV, label: 'RV' }
+    ],
+    series: [{ key: 'volume', color: '#E8798A', width: 1.6 }]
+  });
+  volume.setData(samples.map((s) => ({ t: s.t, volume: s.volume })));
+
+  const spo2 = new LineChart(qs('#a-canvas-spo2'), {
+    theme: 'light',
+    unit: ' %',
+    yLabel: 'SpO₂ (%)',
+    yMin: 70,
+    yMax: 100,
+    refLines: [{ y: 90, label: 'Desaturasi < 90%', color: 'rgba(217, 74, 74, 0.8)' }],
+    series: [{ key: 'spo2', color: '#5BA4E6' }]
+  });
+  spo2.setData(samples.map((s) => ({ t: s.t, spo2: s.spo2 })));
+
   const airflow = new LineChart(qs('#a-canvas-airflow'), {
+    theme: 'light',
     unit: ' L/min',
+    yLabel: 'L/min',
     series: [{ key: 'flow', color: '#7DD3D0', fill: true }]
   });
   airflow.setData(samples.map((s) => ({ t: s.t, flow: s.flow })));
 
   const blower = new LineChart(qs('#a-canvas-blower'), {
+    theme: 'light',
     unit: '%',
+    yLabel: 'Output (%)',
     yMin: 0,
     yMax: 100,
     series: [{ key: 'blower', color: '#F4B942', fill: true }]
@@ -171,17 +207,22 @@ function buildCharts(samples) {
   blower.setData(samples.map((s) => ({ t: s.t, blower: s.blower })));
 
   const obstruction = new LineChart(qs('#a-canvas-obstruction'), {
+    theme: 'light',
     unit: '%',
+    yLabel: 'Obstruksi (%)',
     yMin: 0,
     yMax: 100,
-    series: [{ key: 'obstruction', color: '#D94A4A', fill: true }]
+    series: [
+      { key: 'obstruction', color: '#D94A4A', label: 'Severity', fill: true },
+      { key: 'effective', color: '#F4B942', label: 'Efektif', dashed: true }
+    ]
   });
-  obstruction.setData(samples.map((s) => ({ t: s.t, obstruction: s.obstruction })));
+  obstruction.setData(samples.map((s) => ({ t: s.t, obstruction: s.obstruction, effective: s.effectiveObstruction })));
 
-  charts = [pressure, airflow, blower, obstruction];
+  charts = [pressure, volume, airflow, spo2, blower, obstruction];
 
   // --- BAGIAN YANG DIUBAH: Gunakan style.display = 'none' ---
-  ['pressure', 'airflow', 'blower', 'obstruction'].forEach((id) => {
+  ['pressure', 'volume', 'airflow', 'spo2', 'blower', 'obstruction'].forEach((id) => {
     const emptyEl = qs(`#a-empty-${id}`);
     if (emptyEl) {
        emptyEl.style.display = 'none';
