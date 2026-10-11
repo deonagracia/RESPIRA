@@ -21,7 +21,7 @@
 const defaultState = Object.freeze({
   // Lab control state
   cpapOn: false,
-  simStatus: 'idle', // 'idle' | 'running' | 'paused' | 'sleep'
+  simStatus: 'idle', // 'idle' | 'running' | 'paused'
 
   // Scenario controls (0..100 / physical units)
   obstruction: 20, // percent, 0 = fully open, 100 = fully occluded
@@ -29,9 +29,9 @@ const defaultState = Object.freeze({
   respRate: 14, // breaths per minute
 
   // PID gains — read by pidController.js on every tick
-  kp: 4.5,
-  ki: 1.4,
-  kd: 0.08,
+  kp: 8,
+  ki: 10,
+  kd: 0.05,
 
   // Live telemetry, published by the simulation engine (null until Start is pressed at least once)
   actualPressure: null, // cmH2O
@@ -50,6 +50,11 @@ const defaultState = Object.freeze({
   ahi: null, // kejadian per jam
   spo2Min: null, // %
   osaEvents: [], // [{type, start, end}]
+  pcrit: null, // cmH2O, tekanan kritis kolaps faring
+  currentEventSec: 0, // durasi kejadian yang sedang berlangsung (s)
+  currentEventType: null, // 'apnea' | 'hypopnea' | null
+  pendingCount: 0,
+  aroused: false, // pasien terbangun sejenak (arousal) — mengakhiri apnea
 
   // Navigation / mode flags
   microscopicMode: false

@@ -270,14 +270,15 @@ export class LineChart {
       if (b.end < xMin || b.start > xMax) return;
       const x0 = xToPx(Math.max(xMin, b.start));
       const x1 = xToPx(Math.min(xMax, b.end));
-      const apnea = b.type === 'apnea';
-      ctx.fillStyle = apnea ? 'rgba(217, 74, 74, 0.16)' : 'rgba(244, 185, 66, 0.16)';
+      const style = BAND_STYLES[b.type] ?? BAND_STYLES.hypopnea;
+      ctx.fillStyle = style.fill;
       ctx.fillRect(x0, mt, Math.max(1, x1 - x0), h);
-      ctx.fillStyle = apnea ? 'rgba(217, 74, 74, 0.95)' : 'rgba(244, 185, 66, 0.95)';
+      ctx.fillStyle = style.text;
       ctx.font = 'bold 10px Inter, sans-serif';
       ctx.textAlign = 'left';
-      ctx.textBaseline = 'bottom';
-      if (x1 - x0 > 14) ctx.fillText(apnea ? 'Apnea' : 'Hipopnea', x0 + 3, mt + h - 2); // label di bawah agar tidak menumpuk label TLC/nilai
+      ctx.textBaseline = style.top ? 'top' : 'bottom';
+      // label kejadian di bawah agar tidak menumpuk label TLC/nilai; label CPAP di atas
+      if (x1 - x0 > 14) ctx.fillText(style.label, x0 + 3, style.top ? mt + 2 : mt + h - 2);
     });
 
     this.series.forEach((s) => {
@@ -330,6 +331,12 @@ export class LineChart {
     });
   }
 }
+
+const BAND_STYLES = {
+  apnea: { fill: 'rgba(217, 74, 74, 0.16)', text: 'rgba(217, 74, 74, 0.95)', label: 'Apnea' },
+  hypopnea: { fill: 'rgba(244, 185, 66, 0.16)', text: 'rgba(244, 185, 66, 0.95)', label: 'Hipopnea' },
+  cpap: { fill: 'rgba(15, 157, 154, 0.08)', text: 'rgba(15, 157, 154, 0.9)', label: 'CPAP ON', top: true }
+};
 
 function niceStep(raw) {
   if (!(raw > 0)) return 1;

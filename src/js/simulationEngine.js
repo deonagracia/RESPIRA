@@ -11,8 +11,7 @@
  * Responsibilities:
  *  - own the RespiratoryModel + PIDController instances and step them on
  *    a fixed physics timestep (accumulator pattern, independent of frame rate)
- *  - drive the "Sleep Simulation" auto-obstruction pattern and restore the
- *    user's manual obstruction value when sleep mode ends
+ *  - run the breath analyzer (VT, RR, apnea/hypopnea detection, AHI)
  *  - publish telemetry to state.js (for reactive stat tiles/chips
  *    anywhere in the app) and to simHistory.js (for the Analyze page), at
  *    a throttled rate
@@ -23,7 +22,7 @@
  *
  * Pages never import RespiratoryModel/PIDController directly — they only
  * read state.js, listen for `sim:tick`, and call the small control
- * functions this module exports (resetRun, requestSleepToggle).
+ * functions this module exports (resetRun, getBreathSummary).
  */
 
 import { getState, setState } from './state.js';
@@ -48,34 +47,9 @@ let physicsAccumulator = 0;
 let publishAccumulator = 0;
 
 let simClock = 0;
-let sleepClock = 0;
 let wasCpapOn = false;
 let prevStatus = 'idle';
-let manualObstructionBeforeSleep = null;
 let lastTick = null;
-
-/**
- * A scripted overnight obstruction pattern for "Sleep Simulation": mild
- * baseline narrowing punctuated by repeating obstructive events that ramp
- * up, hold, and release — a simplified stand-in for an apnea/hypopnea
- * cycle. Drives the same `obstruction` value the manual slider would.
- * @param {number} tSec - seconds since sleep mode was activated
- */
-function sleepObstructionPattern(tSec) {
-  // Siklus 60 s: napas normal → faring kolaps → apnea ±22 s → arousal,
-  // jalan napas terbuka kembali → napas pemulihan. Durasi apnea 20–30 s
-  // adalah tipikal pada pasien OSA (kriteria minimal AASM: ≥ 10 s).
-  const period = 60;
-  const t = tSec % period;
-  const baseline = 15;
-  const peak = 96;
-
-  if (t < 15) return baseline; // napas tenang
-  if (t < 20) return baseline + (peak - baseline) * ((t - 15) / 5); // faring mulai kolaps
-  if (t < 42) return peak; // apnea obstruktif
-  if (t < 45) return peak - (peak - baseline) * ((t - 42) / 3); // arousal, jalan napas terbuka
-  return baseline; // napas pemulihan
-}
 
 /** Start the persistent engine loop. Safe to call more than once — only the first call takes effect. */
 export function initEngine() {
@@ -93,8 +67,6 @@ export function resetRun() {
   analyzer.reset();
   simHistory.clearHistory();
   simClock = 0;
-  sleepClock = 0;
-  manualObstructionBeforeSleep = null;
   publishAccumulator = 0;
   lastTick = null;
 }
@@ -114,7 +86,7 @@ function loop(now) {
   const status = getState().simStatus;
   watchStatusTransition(status);
 
-  const isActive = status === 'running' || status === 'sleep';
+  const isActive = status === 'running';
   if (!isActive) return;
 
   physicsAccumulator += frameDt;
@@ -133,20 +105,7 @@ function loop(now) {
   }
 }
 
-/** Detect entering/leaving Sleep mode so the manual obstruction value can be captured/restored. */
 function watchStatusTransition(status) {
-  if (status === prevStatus) return;
-
-  if (status === 'sleep' && prevStatus !== 'sleep') {
-    manualObstructionBeforeSleep = getState().obstruction;
-    sleepClock = 0;
-  } else if (prevStatus === 'sleep' && status !== 'sleep') {
-    if (manualObstructionBeforeSleep != null) {
-      setState({ obstruction: manualObstructionBeforeSleep });
-    }
-    manualObstructionBeforeSleep = null;
-  }
-
   prevStatus = status;
 }
 
@@ -157,14 +116,7 @@ function tickPhysics(dt, status) {
   wasCpapOn = s.cpapOn;
   pid.setGains({ kp: s.kp, ki: s.ki, kd: s.kd });
 
-  let obstruction = s.obstruction;
-  if (status === 'sleep') {
-    sleepClock += dt;
-    obstruction = sleepObstructionPattern(sleepClock);
-    if (Math.abs(obstruction - s.obstruction) > 0.05) {
-      setState({ obstruction });
-    }
-  }
+  const obstruction = s.obstruction;
 
   simClock += dt;
 
@@ -179,7 +131,7 @@ function tickPhysics(dt, status) {
     cpapOn: s.cpapOn
   });
 
-  analyzer.step({ t: simClock, volume: result.volume, pmus: result.pmus, spo2: result.spo2 });
+  analyzer.step({ t: simClock, volume: result.volume, pmus: result.pmus, spo2: result.spo2, aroused: result.aroused });
 
   lastTick = {
     t: simClock,
@@ -198,7 +150,9 @@ function tickPhysics(dt, status) {
     pmus: result.pmus,
     spo2: result.spo2,
     ve: result.ve,
-    inEvent: analyzer.current != null // sedang dalam kejadian apnea/hipopnea (untuk penanda di grafik)
+    inEvent: analyzer.current != null, // sedang dalam kejadian apnea/hipopnea
+    aroused: result.aroused, // pasien sedang terbangun sejenak (arousal)
+    cpapOn: s.cpapOn
   };
 }
 
@@ -221,6 +175,8 @@ function publishTelemetry() {
     spo2: lastTick.spo2,
     minuteVentilation: lastTick.ve,
     effectiveObstruction: lastTick.effectiveObstruction,
+    pcrit: lastTick.pcrit,
+    aroused: lastTick.aroused,
     ...breathSummary()
   });
   
@@ -237,7 +193,10 @@ function breathSummary() {
     hypopneaCount: b.hypopneaCount,
     ahi: b.ahi,
     spo2Min: b.spo2Min,
-    osaEvents: b.events.slice() // [{type, start, end}] — penanda di grafik
+    osaEvents: b.events.slice(), // [{type, start, end}] — penanda di grafik
+    currentEventSec: b.currentEventSec,
+    currentEventType: b.currentEventType,
+    pendingCount: b.pendingCount
   };
 }
 

@@ -47,16 +47,35 @@ export class BreathAnalyzer {
     this.apneaCount = 0;
     this.hypopneaCount = 0;
     this.spo2Min = null;
+    this.spo2Recent = []; // {t, spo2} 30 s terakhir — baseline SpO2 pra-kejadian (AASM)
+  }
+
+  /**
+   * Hentikan sementara analisis (mis. selama manuver spirometri) supaya napas
+   * dalam yang disengaja tidak dihitung sebagai VT / baseline / kejadian OSA.
+   */
+  pause() {
+    this.history = []; // RR & baseline dihitung ulang dari napas tenang setelah manuver
+    this.rr = null;
+    this.breathStart = null;
+    this.current = null;
+    this.prevPmus = 0;
+    this.vMin = Infinity;
+    this.vMax = -Infinity;
   }
 
   /**
    * Dipanggil setiap langkah fisika.
    * @param {{t:number, volume:number, pmus:number, spo2:number}} s
    */
-  step({ t, volume, pmus, spo2 }) {
+  step({ t, volume, pmus, spo2, aroused = false }) {
+    if (aroused) this.breathAroused = true;
     this.vMin = Math.min(this.vMin, volume);
     this.vMax = Math.max(this.vMax, volume);
     this.spo2Min = this.spo2Min == null ? spo2 : Math.min(this.spo2Min, spo2);
+    const lastRec = this.spo2Recent[this.spo2Recent.length - 1];
+    if (!lastRec || t - lastRec.t >= 0.5) this.spo2Recent.push({ t, spo2 });
+    while (this.spo2Recent.length && this.spo2Recent[0].t < t - 30) this.spo2Recent.shift();
     if (this.current) this.current.spo2Min = Math.min(this.current.spo2Min, spo2);
     this.pending.forEach((p) => (p.spo2Min = Math.min(p.spo2Min, spo2)));
 
@@ -64,8 +83,10 @@ export class BreathAnalyzer {
     const onset = this.prevPmus >= 0 && pmus < 0;
     this.prevPmus = pmus;
     if (onset) {
-      if (this.breathStart != null) this._closeBreath(t, spo2);
+      if (this.breathStart != null) this._closeBreath(t, spo2, volume);
       this.breathStart = t;
+      this.vStart = volume;
+      this.breathAroused = aroused;
       this.vMin = volume;
       this.vMax = volume;
     }
@@ -73,11 +94,16 @@ export class BreathAnalyzer {
     this._resolvePending(t);
   }
 
-  _closeBreath(t, spo2) {
-    const vt = Math.max(0, this.vMax - this.vMin);
+  _closeBreath(t, spo2, vEnd) {
+    // VT = min(volume inspirasi, volume ekspirasi). Dengan begitu pergeseran garis
+    // dasar paru (mis. saat CPAP baru dinyalakan, volume akhir ekspirasi naik)
+    // tidak terbaca sebagai napas besar.
+    const vtInsp = this.vMax - (this.vStart ?? this.vMin);
+    const vtExp = this.vMax - vEnd;
+    const vt = Math.max(0, Math.min(vtInsp, vtExp));
     const duration = t - this.breathStart;
     this.lastVT = vt;
-    this.history.push({ t, vt });
+    this.history.push({ t, vt, aroused: !!this.breathAroused });
     while (this.history.length && this.history[0].t < t - BASELINE_WINDOW_SEC) this.history.shift();
 
     // RR terukur: jumlah napas efektif (VT ≥ 150 mL) per menit dalam 30 s terakhir.
@@ -88,13 +114,20 @@ export class BreathAnalyzer {
     const span = recent.length > 1 ? recent[recent.length - 1].t - recent[0].t : 0;
     this.rr = span > 0 ? (Math.max(0, effective - (recent[0].vt >= EFFECTIVE_BREATH_L ? 1 : 0)) * 60) / span : null;
 
-    // Baseline = VT terbesar 2 menit terakhir (minimal nilai referensi)
-    const baseline = Math.max(BASELINE_DEFAULT_L * 0.6, ...this.history.map((h) => h.vt));
+    // Baseline = VT terbesar 2 menit terakhir dari napas STABIL (napas dalam saat
+    // arousal dikecualikan, sesuai AASM: baseline = napas stabil sebelum kejadian)
+    const stable = this.history.filter((h) => !h.aroused).map((h) => h.vt);
+    // Belum ada napas stabil (mis. simulasi dimulai langsung dalam kondisi OSA) →
+    // pakai VT normal dewasa sebagai referensi
+    const baseline = stable.length ? Math.max(BASELINE_DEFAULT_L * 0.6, ...stable) : BASELINE_DEFAULT_L;
     const ratio = vt / baseline;
 
     if (ratio <= HYPOPNEA_RATIO) {
       if (!this.current) {
-        this.current = { start: this.breathStart, apneaSec: 0, spo2Start: spo2, spo2Min: spo2 };
+        // Baseline SpO2 = nilai tertinggi 30 s sebelum kejadian (pre-event baseline)
+        const pre = this.spo2Recent.filter((r) => r.t <= this.breathStart).map((r) => r.spo2);
+        const spo2Start = pre.length ? Math.max(...pre) : spo2;
+        this.current = { start: this.breathStart, apneaSec: 0, spo2Start, spo2Min: spo2 };
       }
       if (ratio <= APNEA_RATIO) this.current.apneaSec += duration;
     } else if (this.current) {
@@ -140,6 +173,12 @@ export class BreathAnalyzer {
       hypopneaCount: this.hypopneaCount,
       ahi: t >= 60 ? total / hours : null, // AHI baru bermakna setelah ≥ 1 menit
       inEvent: !!this.current,
+      currentEventSec: this.current ? Math.max(0, t - this.current.start) : 0,
+      // Jenis kejadian berjalan: apnea bila sebagian besar napasnya hampir tanpa aliran
+      currentEventType: this.current
+        ? (this.current.apneaSec >= 0.5 * Math.max(1, t - this.current.start) ? 'apnea' : 'hypopnea')
+        : null,
+      pendingCount: this.pending.length, // hipopnea yang menunggu konfirmasi desaturasi
       events: this.events,
       spo2Min: this.spo2Min
     };

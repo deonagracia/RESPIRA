@@ -56,8 +56,8 @@ export function render() {
         </div>
 
         <div class="sleep-phase-banner" id="sleep-phase-banner" hidden>
-          <span class="sleep-phase-eyebrow">Sleep Simulation, not a display theme: a scripted obstructive-event cycle</span>
-          <span class="sleep-phase-label" id="sleep-phase-label">Normal Breathing</span>
+          <span class="sleep-phase-eyebrow">Kondisi pasien (tidur) — real-time</span>
+          <span class="sleep-phase-label" id="sleep-phase-label">Napas normal</span>
         </div>
 
         <div class="viewport-toolbar lab-viewport-toolbar">
@@ -99,7 +99,7 @@ export function render() {
             <span class="severity-tag" id="severity-tag">Mild</span>
             <div class="mini-airway" id="mini-airway"></div>
           </div>
-          <p class="control-live-note" id="obstruction-auto-note" hidden>Auto-driven by Sleep Simulation</p>
+          <p class="control-hint">Geser ke ≥80% (tanpa CPAP) untuk melihat apnea/hipopnea berulang.</p>
         </div>
 
         <div class="control-group">
@@ -136,7 +136,6 @@ export function render() {
           <button type="button" class="btn btn-primary" id="btn-start">▶ Start</button>
           <button type="button" class="btn btn-outline" id="btn-pause" disabled>⏸ Pause</button>
           <button type="button" class="btn btn-ghost" id="btn-reset">⟲ Reset</button>
-          <button type="button" class="btn btn-outline" id="btn-sleep">🌙 Sleep Simulation</button>
         </div>
       </aside>
 
@@ -199,24 +198,27 @@ export function render() {
 
         <p class="stat-group-title">Jalan napas &amp; OSA</p>
         <div class="stat-grid">
-            <div class="stat-tile stat-placeholder" id="tile-eff-obs">
-              <span class="stat-label">Effective Obstruction</span>
+            <div class="stat-tile stat-placeholder" id="tile-eff-obs" title="Seberapa tertutup faring SAAT INI (0% terbuka, 100% tertutup), setelah memperhitungkan efek CPAP. Berbeda dengan slider OSA Severity: slider mengatur kecenderungan kolaps (Pcrit), sedangkan tile ini hasil akhirnya.">
+              <span class="stat-label">Effective Obstruction <span class="stat-info" aria-hidden="true">ⓘ</span></span>
               <span class="stat-value" id="stat-eff-obs">--</span>
+              <span class="stat-sub" id="sub-eff-obs"></span>
               <span class="stat-note" id="note-eff-obs">Press Start</span>
             </div>
-            <div class="stat-tile stat-placeholder" id="tile-resistance">
-              <span class="stat-label">Airway Resistance</span>
+            <div class="stat-tile stat-placeholder" id="tile-resistance" title="Hambatan total saluran napas pasien. Naik tajam saat faring menyempit (R ∝ 1/luas²).">
+              <span class="stat-label">Airway Resistance <span class="stat-info" aria-hidden="true">ⓘ</span></span>
               <span class="stat-value" id="stat-resistance">--</span>
               <span class="stat-note" id="note-resistance">Press Start</span>
             </div>
-            <div class="stat-tile stat-placeholder" id="tile-events">
-              <span class="stat-label">Apnea / Hipopnea</span>
+            <div class="stat-tile stat-placeholder" id="tile-events" title="Jumlah kejadian yang SUDAH selesai dan memenuhi kriteria AASM. Kejadian baru tercatat setelah napas pulih; kejadian yang sedang berlangsung ditampilkan di bawah angka.">
+              <span class="stat-label">Apnea / Hipopnea <span class="stat-info" aria-hidden="true">ⓘ</span></span>
               <span class="stat-value" id="stat-events">--</span>
+              <span class="stat-sub" id="sub-events"></span>
               <span class="stat-note" id="note-events">Press Start</span>
             </div>
-            <div class="stat-tile stat-placeholder" id="tile-ahi">
-              <span class="stat-label">AHI (estimasi)</span>
+            <div class="stat-tile stat-placeholder" id="tile-ahi" title="Apnea–Hypopnea Index = jumlah kejadian per jam tidur. Dipakai untuk menentukan derajat OSA: <5 normal, 5–15 ringan, 15–30 sedang, ≥30 berat. Dihitung setelah simulasi ≥60 s.">
+              <span class="stat-label">AHI (estimasi) <span class="stat-info" aria-hidden="true">ⓘ</span></span>
               <span class="stat-value" id="stat-ahi">--</span>
+              <span class="stat-sub" id="sub-ahi"></span>
               <span class="stat-note" id="note-ahi">Press Start</span>
             </div>
         </div>
@@ -283,7 +285,7 @@ export function init() {
   scene.setRespiratoryRate(getState().respRate);
   scene.setObstruction(getState().obstruction);
   scene.setCPAPActive(getState().cpapOn);
-  scene.setBreathingRunning(getState().simStatus === 'running' || getState().simStatus === 'sleep');
+  scene.setBreathingRunning(getState().simStatus === 'running');
 
   airwayPreview = createAirwayDiagram(qs('#mini-airway'), {
     obstruction: getState().obstruction,
@@ -533,15 +535,6 @@ function wireRunButtons() {
 
     toast('Simulation reset. The model, controller, and recorded history have been cleared.', { type: 'info' });
   });
-
-  qs('#btn-sleep').addEventListener('click', () => {
-    const isSleeping = getState().simStatus === 'sleep';
-    setState({ simStatus: isSleeping ? 'idle' : 'sleep' });
-    emit('sim:sleep', { active: !isSleeping });
-    if (!isSleeping) {
-      toast('Sleep Simulation started. This is not a display theme: it runs a scripted, repeating airway-obstruction cycle so you can watch CPAP and the PID controller respond to a recurring apnea-like event.', { type: 'info' });
-    }
-  });
 }
 
 function wireZoom() {
@@ -577,7 +570,7 @@ function wireViewportToolbar() {
 function applyState(state) {
   const simChip = qs('#chip-sim-status');
   if (simChip) {
-    const labels = { idle: 'Idle', running: 'Running', paused: 'Paused', sleep: 'Sleep Mode' };
+    const labels = { idle: 'Idle', running: 'Running', paused: 'Paused' };
     simChip.textContent = labels[state.simStatus] || 'Idle';
     simChip.className = `status-chip status-${state.simStatus}`;
   }
@@ -594,13 +587,10 @@ function applyState(state) {
     obstructionChip.textContent = `Obstruction: ${severityLabel(state.obstruction)}`;
   }
 
-  const isSleeping = state.simStatus === 'sleep';
   const obstructionInput = qs('#ctl-obstruction');
-  if (obstructionInput) {
+  if (obstructionInput && document.activeElement !== obstructionInput) {
     obstructionInput.value = String(Math.round(state.obstruction));
-    obstructionInput.disabled = isSleeping;
   }
-  qs('#obstruction-auto-note')?.toggleAttribute('hidden', !isSleeping);
 
   const valObstruction = qs('#val-obstruction');
   if (valObstruction) valObstruction.textContent = `${Math.round(state.obstruction)}%`;
@@ -638,6 +628,7 @@ function applyState(state) {
     if (ahiEl) ahiEl.innerHTML = '<small>menunggu ≥ 60 s</small>';
   }
   qs('#tile-ahi')?.classList.toggle('stat-tile-warning', state.ahi != null && state.ahi >= 5);
+  applyOsaDetails(state);
   qs('#tile-vt')?.classList.toggle('stat-tile-warning', state.tidalVolume != null && state.tidalVolume < 0.25);
   applyEventBands(state.osaEvents);
   setStatTile('ve', state.minuteVentilation, (v) => `${v.toFixed(1)} <small>L/min</small>`);
@@ -666,21 +657,17 @@ function applyState(state) {
   const startBtn = qs('#btn-start');
   const pauseBtn = qs('#btn-pause');
   if (startBtn && pauseBtn) {
-    const running = state.simStatus === 'running' || state.simStatus === 'sleep';
+    const running = state.simStatus === 'running';
     startBtn.disabled = running;
     pauseBtn.disabled = !running;
   }
-
-  const sleepBtn = qs('#btn-sleep');
-  sleepBtn?.classList.toggle('active', isSleeping);
-  if (sleepBtn) sleepBtn.textContent = isSleeping ? '🌙 End Sleep Simulation' : '🌙 Sleep Simulation';
 
   // Tampilkan obstruksi EFEKTIF (setelah efek splint CPAP), bukan nilai slider mentah
   const effObs = state.effectiveObstruction ?? state.obstruction;
   airwayPreview?.setObstruction(effObs);
   airwayPreview?.setFlowSpeed(state.airflow != null ? 0.3 + Math.min(1, Math.abs(state.airflow) / 30) : 1);
 
-  const isRunning = state.simStatus === 'running' || state.simStatus === 'sleep';
+  const isRunning = state.simStatus === 'running';
   scene?.setBreathingRunning(isRunning);
   scene?.setRespiratoryRate(state.respRate);
   scene?.setAutoRotate(false); // tidak berputar otomatis selama simulasi
@@ -690,7 +677,6 @@ function applyState(state) {
   scene?.setAirflow(state.airflow);
 
   const viewport = qs('#lab-viewport');
-  viewport?.classList.toggle('is-sleep', isSleeping);
   viewport?.classList.toggle('is-cpap', state.cpapOn);
 
   const sleepBanner = qs('#sleep-phase-banner');
@@ -702,26 +688,61 @@ function applyState(state) {
   }
   
   if (sleepLabel) {
-    sleepLabel.textContent = sleepPhaseLabel(state.obstruction, state.cpapOn);
+    sleepLabel.textContent = patientPhaseLabel(state);
   }
-
   if (sleepEyebrow) {
-    sleepEyebrow.textContent = state.simStatus === 'sleep'
-      ? 'Sleep Simulation, not a display theme: a scripted obstructive-event cycle'
-      : 'Manual Control: Real-time Airway Response';
+    sleepEyebrow.textContent = 'Kondisi pasien (tidur) — real-time';
   }
 }
 
-function sleepPhaseLabel(obstructionPct, cpapOn) {
-  if (obstructionPct >= 70) return cpapOn ? 'Obstructive Event, CPAP Responding' : 'Obstructive Event (Apnea / Hypopnea)';
-  if (obstructionPct >= 25) return cpapOn ? 'Airway Narrowing, CPAP Responding' : 'Airway Narrowing';
-  return 'Normal Breathing';
+/** Status pasien berdasarkan hasil model (bukan berdasarkan posisi slider). */
+function patientPhaseLabel(state) {
+  if (state.actualPressure == null) return 'Tekan Start untuk memulai';
+  if (state.aroused) return 'Arousal — terbangun sejenak, jalan napas terbuka';
+  if (state.currentEventSec > 0) {
+    return state.currentEventType === 'apnea'
+      ? 'Apnea — jalan napas tertutup'
+      : 'Napas dangkal (hipopnea) — jalan napas menyempit';
+  }
+  const eff = state.effectiveObstruction ?? 0;
+  if (state.cpapOn) return eff < 30 ? 'CPAP aktif — jalan napas terbuka' : 'CPAP aktif — tekanan belum cukup';
+  if (eff >= 50) return 'Jalan napas menyempit';
+  return 'Napas normal';
 }
 
 function syncNumberInput(selector, value) {
   const el = qs(selector);
   if (!el || document.activeElement === el) return;
   if (Number(el.value) !== value) el.value = String(value);
+}
+
+function applyOsaDetails(state) {
+  const running = state.actualPressure != null;
+  const subEff = qs('#sub-eff-obs');
+  if (subEff) {
+    subEff.textContent = running && state.pcrit != null
+      ? `Pcrit ${state.pcrit.toFixed(0)} cmH₂O`
+      : '';
+  }
+  const subEv = qs('#sub-events');
+  if (subEv) {
+    if (running && state.currentEventSec > 0) {
+      const type = state.currentEventType === 'apnea' ? 'apnea' : 'napas dangkal';
+      const sec = Math.floor(state.currentEventSec);
+      subEv.textContent = sec >= 10 ? `● ${type} ${sec} s ✓` : `● ${type} ${sec}/10 s`;
+      subEv.classList.add('is-live');
+    } else if (running && state.pendingCount > 0) {
+      subEv.textContent = 'cek desaturasi…';
+      subEv.classList.add('is-live');
+    } else {
+      subEv.textContent = '';
+      subEv.classList.remove('is-live');
+    }
+  }
+  const subAhi = qs('#sub-ahi');
+  if (subAhi) {
+    subAhi.textContent = '';
+  }
 }
 
 let lastBandCount = -1;

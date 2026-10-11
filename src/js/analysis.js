@@ -1,104 +1,136 @@
 /**
- * analysis.js — "05 ANALYZE" page.
+ * analysis.js — "05 ANALYZE" page (Phase 3).
  *
- * Phase 2: reads the recorded run from simHistory.js (written by
- * simulationEngine.js while the Simulate page was active) and renders
- * real System Response metrics, four static result charts, and a short
- * auto-generated interpretation — all computed from the actual recorded
- * samples, nothing fabricated. If no simulation has been run yet, the
- * page falls back to the exact same "no data" layout Phase 1 shipped.
+ * Membaca rekaman simulasi dari simHistory.js lalu menyajikan:
+ *  1. Perbandingan TANPA CPAP vs DENGAN CPAP (AHI, apnea, hipopnea, SpO2,
+ *     obstruksi efektif, arousal, ventilasi)
+ *  2. Kinerja kontrol PID saat CPAP aktif (rise time, overshoot,
+ *     settling time, steady-state error, output blower)
+ *  3. Grafik hasil + cara membacanya
+ *  4. Penjelasan setiap indikator jalan napas & OSA
+ *  5. Interpretasi otomatis
  *
- * This is a snapshot: it reads the history once when the page mounts,
- * matching Phase 1's framing of Analyze as the "look back at what
- * happened" step in the EXPLORE → UNDERSTAND → SIMULATE → ANALYZE flow.
- * If the engine is still running in the background, revisiting this page
- * (or navigating away and back) refreshes the snapshot.
+ * Semua angka dihitung dari sampel yang benar-benar terekam — tidak ada
+ * nilai yang dikarang. Halaman ini adalah snapshot saat dibuka.
  */
 
 import { qs, renderStepFooter } from './ui.js';
-import { getSamples, hasData, computeStats } from './simHistory.js';
+import { getSamples, hasData } from './simHistory.js';
 import { LineChart } from './charts.js';
-import { PHYSIOLOGY } from './respiratoryModel.js';
+import { PHYSIOLOGY, pcritFromObstruction, airwayPatency } from './respiratoryModel.js';
 import { getBreathSummary } from './simulationEngine.js';
 import { ahiSeverity } from './breathAnalyzer.js';
 
-const STATS = [
-  { key: 'target', label: 'Target Pressure', unit: 'cmH₂O' },
-  { key: 'actual', label: 'Actual Pressure', unit: 'cmH₂O' },
-  { key: 'maxError', label: 'Maximum Error', unit: 'cmH₂O' },
-  { key: 'settlingTime', label: 'Settling Time', unit: 's' },
-  { key: 'peakBlower', label: 'Peak Blower Output', unit: '%' },
-  { key: 'avgFlow', label: 'Mean |Airflow|', unit: 'L/min' },
-  { key: 'ahi', label: 'AHI', unit: '/h' },
-  { key: 'apnea', label: 'Apnea Events', unit: '' },
-  { key: 'hypopnea', label: 'Hypopnea Events', unit: '' },
-  { key: 'spo2Min', label: 'Lowest SpO₂', unit: '%' }
-];
+const MIN_AHI_SEC = 60; // AHI baru bermakna setelah ≥ 60 s data
 
 const CHARTS = [
-  { id: 'pressure', title: 'Pressure Response' },
-  { id: 'volume', title: 'Lung Volume (Volume–Time)' },
-  { id: 'airflow', title: 'Airflow' },
-  { id: 'spo2', title: 'SpO₂' },
-  { id: 'blower', title: 'Blower Output' },
-  { id: 'obstruction', title: 'Obstruction Timeline' }
+  {
+    id: 'pressure',
+    title: 'Tekanan mask (target vs aktual)',
+    how: 'Garis putus-putus = setpoint, garis penuh = tekanan terukur. Saat CPAP ON, kurva aktual harus naik ke target lalu tetap di sekitarnya. Riak kecil ±1 cmH₂O wajar karena napas pasien menjadi gangguan (disturbance) bagi loop PID.'
+  },
+  {
+    id: 'airflow',
+    title: 'Aliran udara (flow–time)',
+    how: 'Positif = inspirasi, negatif = ekspirasi. Napas normal ±30 L/min. Saat apnea kurva hampir datar di 0 walaupun pasien tetap berusaha bernapas — tanda khas apnea OBSTRUKTIF.'
+  },
+  {
+    id: 'volume',
+    title: 'Volume paru (volume–time)',
+    how: 'Napas tenang berosilasi ±0,5 L di atas FRC. Saat apnea amplitudonya hilang. Saat CPAP ON garis dasar naik sedikit karena tekanan positif mengembangkan paru (volume akhir ekspirasi naik).'
+  },
+  {
+    id: 'spo2',
+    title: 'Saturasi oksigen (SpO₂)',
+    how: 'Normal 95–100 %. Turun beberapa detik SETELAH apnea dimulai (ada keterlambatan), dan pulih setelah napas kembali. Garis merah 90 % = batas desaturasi klinis.'
+  },
+  {
+    id: 'blower',
+    title: 'Output blower (sinyal kendali PID)',
+    how: 'Ini output kontroler u(t) dalam %. Lonjakan di awal = PID mengejar setpoint. Setelah stabil, output naik-turun kecil mengikuti siklus napas untuk melawan gangguan.'
+  },
+  {
+    id: 'obstruction',
+    title: 'Obstruksi: derajat OSA vs efektif',
+    how: 'Garis merah = pengaturan derajat OSA (kecenderungan kolaps). Garis kuning putus-putus = obstruksi efektif yang benar-benar terjadi. Tanpa CPAP keduanya tinggi; dengan CPAP garis kuning turun mendekati 0 → CPAP "membidai" jalan napas.'
+  }
 ];
 
 let charts = [];
+
+/* ---------------------------------------------------------------------- */
+/* Render                                                                  */
+/* ---------------------------------------------------------------------- */
 
 export function render() {
   return `
     <section class="analysis-page">
       <header class="page-heading">
         <p class="page-kicker">05 · ANALYZE</p>
-        <h1>Simulation Analysis</h1>
+        <h1>Analisis Simulasi</h1>
         <p class="page-lede">
-          Run a simulation to populate this page with system-response metrics,
-          time-series graphs, and an automatic interpretation of the control performance.
+          Ringkasan hasil simulasi OSA + CPAP berbasis PID: apakah kontroler menjaga tekanan
+          sesuai target, dan apakah tekanan tersebut benar-benar mengatasi apnea.
         </p>
       </header>
 
       <div class="analysis-empty-banner" id="analysis-banner">
-        <span id="analysis-banner-text">No simulation run recorded yet.</span>
-        <a class="btn btn-primary btn-sm" href="#/simulate">Go to Simulation</a>
+        <span id="analysis-banner-text">Belum ada simulasi yang terekam.</span>
+        <a class="btn btn-primary btn-sm" href="#/simulate">Ke Simulasi</a>
       </div>
 
       <section class="analysis-section">
-        <h2>System Response</h2>
-        <div class="stat-grid analysis-stat-grid">
-          ${STATS.map((s) => `
-            <div class="stat-tile stat-placeholder" id="a-tile-${s.key}">
-              <span class="stat-label">${s.label}</span>
-              <span class="stat-value" id="a-stat-${s.key}">-- <small>${s.unit}</small></span>
-              <span class="stat-note" id="a-note-${s.key}">No data</span>
-            </div>
-          `).join('')}
+        <h2>1. Hasil klinis: tanpa CPAP vs dengan CPAP</h2>
+        <p class="analysis-intro">
+          Bagian ini menjawab pertanyaan utama: <b>apakah CPAP mengatasi OSA?</b> Setiap kolom
+          dihitung hanya dari bagian simulasi saat CPAP mati atau menyala.
+        </p>
+        <div class="compare-table-wrap" id="compare-wrap">
+          <p class="analysis-muted">Jalankan simulasi tanpa CPAP lalu dengan CPAP untuk melihat perbandingan.</p>
         </div>
       </section>
 
       <section class="analysis-section">
-        <h2>Response Graphs</h2>
+        <h2>2. Kinerja kontrol PID (saat CPAP menyala)</h2>
+        <p class="analysis-intro">
+          Metrik respons sistem kendali standar, dihitung sejak CPAP dinyalakan. Toleransi
+          stabil = ±1 cmH₂O (atau ±10 % target), setara akurasi alat CPAP komersial.
+        </p>
+        <div class="stat-grid analysis-stat-grid" id="pid-grid">
+          <p class="analysis-muted">Nyalakan CPAP saat simulasi berjalan untuk mengukur kinerja PID.</p>
+        </div>
+      </section>
+
+      <section class="analysis-section">
+        <h2>3. Grafik hasil</h2>
+        <p class="analysis-intro">
+          Area <span class="legend-chip legend-chip-cpap">hijau</span> = CPAP menyala,
+          <span class="legend-chip legend-chip-apnea">merah</span> = apnea,
+          <span class="legend-chip legend-chip-hypopnea">kuning</span> = hipopnea.
+        </p>
         <div class="graph-grid analysis-graph-grid">
           ${CHARTS.map((c) => `
             <div class="graph-card">
               <p class="graph-title">${c.title}</p>
-              <canvas class="graph-canvas" id="a-canvas-${c.id}" width="320" height="140"></canvas>
-              <p class="graph-empty" id="a-empty-${c.id}">No data yet</p>
+              <canvas class="graph-canvas" id="a-canvas-${c.id}"></canvas>
+              <p class="graph-empty" id="a-empty-${c.id}">Belum ada data</p>
+              <p class="graph-how"><b>Cara membaca:</b> ${c.how}</p>
             </div>
           `).join('')}
         </div>
       </section>
 
       <section class="analysis-section">
-        <h2>Simulation Interpretation</h2>
+        <h2>4. Penjelasan indikator jalan napas &amp; OSA</h2>
+        ${renderExplanations()}
+      </section>
+
+      <section class="analysis-section">
+        <h2>5. Interpretasi otomatis</h2>
         <div class="interpretation-card">
-          <p id="interpretation-text">
-            Automatic interpretation of your simulation run will appear here, summarizing
-            stability, response time, and control performance once a run has completed.
-          </p>
-          <button type="button" class="btn btn-ghost btn-sm" id="btn-export-report" disabled title="Available in a later phase">
-            Export Report
-          </button>
+          <div id="interpretation-text">
+            <p>Interpretasi hasil simulasi akan muncul di sini setelah simulasi dijalankan.</p>
+          </div>
         </div>
       </section>
 
@@ -107,242 +139,501 @@ export function render() {
   `;
 }
 
-export function init() {
-  qs('#btn-export-report');
+function renderExplanations() {
+  // Tabel contoh dihitung langsung dari model, jadi selalu konsisten dengan simulasi.
+  const rows = [20, 50, 70, 80, 90, 100].map((sev) => {
+    const pcrit = pcritFromObstruction(sev);
+    const off = (1 - airwayPatency(0, pcrit)) * 100;
+    const on = (1 - airwayPatency(8, pcrit)) * 100;
+    return `<tr><td>${sev}%</td><td>${fmt(pcrit, 1)}</td><td>${fmt(off, 0)}%</td><td>${fmt(on, 0)}%</td></tr>`;
+  }).join('');
 
-  if (!hasData()) {
-    return; // Phase 1 "no data" layout stays exactly as rendered above.
-  }
+  return `
+    <div class="explain-grid">
+      <article class="explain-card">
+        <h3>Effective Obstruction (%)</h3>
+        <p>Seberapa tertutup faring <b>saat ini</b> (0 % terbuka, 100 % tertutup), setelah efek CPAP diperhitungkan.</p>
+        <p><b>Bedanya dengan slider "OSA Severity":</b> slider mengatur <i>sifat pasien</i>, yaitu seberapa mudah
+        faring kolaps, yang dinyatakan sebagai <b>Pcrit</b> (tekanan kritis kolaps). Effective Obstruction adalah
+        <i>hasil akhirnya</i>.</p>
+        <p class="formula">Pcrit = ${PHYSIOLOGY.PCRIT_NORMAL} + ${PHYSIOLOGY.PCRIT_SEVERE - PHYSIOLOGY.PCRIT_NORMAL} × (severity/100) cmH₂O<br>
+        Bukaan A = 1 / (1 + e<sup>−(P<sub>faring</sub> − Pcrit)/${PHYSIOLOGY.COLLAPSE_SLOPE}</sup>)<br>
+        Effective Obstruction = (1 − A) × 100 %</p>
+        <p>Faring tetap terbuka selama <b>tekanan di dalamnya &gt; Pcrit</b>. Tanpa CPAP tekanan faring ≈ 0; dengan
+        CPAP 8 cmH₂O tekanan faring ≈ 8 sehingga faring "dibidai" terbuka (<i>pneumatic splint</i>).</p>
+        <table class="explain-table">
+          <thead><tr><th>Severity</th><th>Pcrit (cmH₂O)</th><th>Tanpa CPAP</th><th>CPAP 8</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <p class="analysis-muted">Nilai di atas untuk saat ekspirasi akhir. Saat inspirasi tekanan faring sedikit negatif
+        sehingga obstruksi sedikit lebih besar. Penyempitan ringan (severity rendah) memang tidak membuat faring kolaps.</p>
+      </article>
+
+      <article class="explain-card">
+        <h3>Airway Resistance (cmH₂O·s/L)</h3>
+        <p>Hambatan total saluran napas pasien — seberapa sulit udara mengalir.</p>
+        <p class="formula">R<sub>faring</sub> = ${PHYSIOLOGY.R_UA_OPEN} / A²<br>
+        R<sub>total</sub> = R<sub>saluran bawah</sub> (${PHYSIOLOGY.R_AW}) + R<sub>faring</sub><br>
+        Aliran Q = ΔP / R<sub>total</sub></p>
+        <p>Faring terbuka → ±3 (normal). Saat apnea bisa &gt; 100: udara praktis tidak bisa lewat walaupun pasien
+        tetap berusaha bernapas. Karena hambatan naik sebanding 1/A², penyempitan sedikit saja sudah sangat
+        mengurangi aliran.</p>
+      </article>
+
+      <article class="explain-card">
+        <h3>Apnea / Hipopnea</h3>
+        <p>Kejadian gangguan napas saat tidur, mengikuti kriteria <b>AASM</b> (American Academy of Sleep Medicine)
+        yang disederhanakan. Setiap napas, volume tidal (VT) dibandingkan dengan <b>baseline</b> (VT terbesar
+        2 menit terakhir).</p>
+        <table class="explain-table">
+          <thead><tr><th>Jenis</th><th>Syarat</th></tr></thead>
+          <tbody>
+            <tr><td><b>Apnea</b></td><td>VT turun ≥ 90 % selama ≥ 10 detik</td></tr>
+            <tr><td><b>Hipopnea</b></td><td>VT turun ≥ 30 % selama ≥ 10 detik <b>dan</b> SpO₂ turun ≥ 3 % dari nilai sebelum kejadian</td></tr>
+          </tbody>
+        </table>
+        <p>Kejadian baru <b>tercatat setelah selesai</b> (saat napas pulih), karena baru saat itu durasinya diketahui.
+        Hipopnea menunggu hingga 25 s untuk memastikan desaturasi, karena SpO₂ turun terlambat. Jika CPAP dinyalakan
+        sebelum 10 s, kejadian tidak dihitung — CPAP berhasil mencegahnya.</p>
+      </article>
+
+      <article class="explain-card">
+        <h3>AHI (Apnea–Hypopnea Index)</h3>
+        <p>Ukuran <b>utama</b> derajat OSA di dunia medis.</p>
+        <p class="formula">AHI = (jumlah apnea + hipopnea) / lama tidur (jam)</p>
+        <table class="explain-table">
+          <thead><tr><th>AHI (kejadian/jam)</th><th>Derajat OSA</th></tr></thead>
+          <tbody>
+            <tr><td>&lt; 5</td><td>Normal</td></tr>
+            <tr><td>5 – 15</td><td>Ringan</td></tr>
+            <tr><td>15 – 30</td><td>Sedang</td></tr>
+            <tr><td>≥ 30</td><td>Berat</td></tr>
+          </tbody>
+        </table>
+        <p>AHI dihitung setelah ≥ 60 s data, karena ekstrapolasi beberapa detik ke "per jam" tidak bermakna.
+        Di simulator ini AHI adalah <b>estimasi</b> dari beberapa menit; secara klinis AHI diukur semalaman
+        dengan polisomnografi.</p>
+      </article>
+
+      <article class="explain-card">
+        <h3>Arousal (terbangun sejenak)</h3>
+        <p>Mekanisme alami yang <b>mengakhiri apnea</b>. Bila faring tertutup ±25 s (atau SpO₂ turun ≥ 10 %), otak
+        terbangun sebentar, otot dilator faring berkontraksi sehingga Pcrit turun ${PHYSIOLOGY.AROUSAL_PCRIT_DROP} cmH₂O,
+        jalan napas terbuka, dan pasien mengambil beberapa napas dalam. Setelah tertidur lagi, tonus otot menurun
+        bertahap dan faring kolaps lagi.</p>
+        <p>Siklus <b>apnea → arousal → tidur → apnea</b> inilah yang membuat kejadian berulang sepanjang malam dan
+        membuat tidur pasien OSA terfragmentasi (penyebab kantuk di siang hari).</p>
+      </article>
+
+      <article class="explain-card">
+        <h3>Rantai sebab-akibat sistem</h3>
+        <p class="formula">Setpoint → PID → blower → tekanan mask → tekanan faring &gt; Pcrit → faring terbuka →
+        aliran &amp; VT normal → SpO₂ terjaga → tidak ada apnea → AHI turun</p>
+        <p>Bagian 2 menilai <b>separuh pertama</b> rantai ini (apakah kontroler bekerja). Bagian 1 menilai
+        <b>separuh kedua</b> (apakah tekanan yang dijaga kontroler benar-benar mengobati OSA).</p>
+      </article>
+    </div>
+  `;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Init                                                                    */
+/* ---------------------------------------------------------------------- */
+
+export function init() {
+  if (!hasData()) return;
 
   const samples = getSamples();
-  const stats = computeStats();
-  if (!stats) return;
-
-  qs('#analysis-banner-text').textContent = `Showing the last recorded run: ${stats.sampleCount} samples over ${stats.durationSec.toFixed(1)} s.`;
-  qs('#analysis-banner')?.classList.add('analysis-banner-has-data');
-
-  setStat('target', stats.finalTarget, (v) => `${v.toFixed(1)} <small>cmH₂O</small>`);
-  setStat('actual', stats.finalActual, (v) => `${v.toFixed(1)} <small>cmH₂O</small>`);
-  setStat('maxError', stats.maxError, (v) => `${v.toFixed(2)} <small>cmH₂O</small>`);
-  setStat(
-    'settlingTime',
-    stats.settlingTime,
-    (v) => `${v.toFixed(1)} <small>s</small>`,
-    stats.settlingTime == null ? 'Not settled' : null
-  );
-  setStat('peakBlower', stats.peakBlower, (v) => `${v.toFixed(0)} <small>%</small>`);
-  setStat('avgFlow', stats.avgFlow, (v) => `${v.toFixed(1)} <small>L/min</small>`);
+  if (samples.length < 2) return;
 
   const osa = getBreathSummary();
-  setStat('ahi', osa.ahi, (v) => `${v.toFixed(0)} <small>/h · ${ahiSeverity(v)}</small>`, osa.ahi == null ? 'Run ≥ 60 s' : null);
-  setStat('apnea', osa.apneaCount, (v) => `${v}`);
-  setStat('hypopnea', osa.hypopneaCount, (v) => `${v}`);
-  setStat('spo2Min', osa.spo2Min, (v) => `${v.toFixed(0)} <small>%</small>`);
+  const events = osa.osaEvents ?? [];
+  const duration = samples[samples.length - 1].t - samples[0].t;
 
-  buildCharts(samples);
-  charts.forEach((c) => c.setBands(osa.osaEvents));
-  qs('#interpretation-text').textContent = buildInterpretation(stats, osa);
+  qs('#analysis-banner-text').textContent =
+    `Menampilkan rekaman terakhir: ${fmt(duration, 0)} s simulasi (${samples.length} sampel).`;
+  qs('#analysis-banner')?.classList.add('analysis-banner-has-data');
+
+  const groups = {
+    off: groupStats(samples, events, false),
+    on: groupStats(samples, events, true)
+  };
+  renderComparison(groups);
+
+  const pid = pidStats(samples);
+  renderPid(pid);
+
+  buildCharts(samples, events);
+
+  qs('#interpretation-text').innerHTML = buildInterpretation(groups, pid, duration)
+    .map((p) => `<p>${p}</p>`)
+    .join('');
 }
 
-function setStat(key, value, formatter, overrideText) {
-  const valueEl = qs(`#a-stat-${key}`);
-  const tileEl = qs(`#a-tile-${key}`);
-  const noteEl = qs(`#a-note-${key}`);
-  if (!valueEl) return;
+/* ---------------------------------------------------------------------- */
+/* Perhitungan                                                             */
+/* ---------------------------------------------------------------------- */
 
-  if (value == null || Number.isNaN(value)) {
-    valueEl.innerHTML = overrideText ?? '--';
-    if (noteEl) noteEl.hidden = !overrideText;
-    if (noteEl && overrideText) noteEl.textContent = '';
-    return;
+function sampleDt(samples, i) {
+  if (i + 1 < samples.length) return samples[i + 1].t - samples[i].t;
+  return i > 0 ? samples[i].t - samples[i - 1].t : 0;
+}
+
+function cpapAt(samples, t) {
+  // sampel pertama dengan waktu ≥ t
+  let lo = 0;
+  let hi = samples.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (samples[mid].t < t) lo = mid + 1;
+    else hi = mid;
   }
-
-  valueEl.innerHTML = formatter(value);
-  tileEl?.classList.remove('stat-placeholder');
-  if (noteEl) noteEl.hidden = true;
+  return !!samples[lo].cpapOn;
 }
 
-function buildCharts(samples) {
-  const pressure = new LineChart(qs('#a-canvas-pressure'), {
-    theme: 'light',
-    unit: ' cmH₂O',
-    yLabel: 'cmH₂O',
-    series: [
-      { key: 'target', color: '#7DD3D0', dashed: true, label: 'Target', width: 1.6 },
-      { key: 'actual', color: '#0F9D9A', label: 'Actual', fill: true }
-    ]
+/** Statistik klinis untuk bagian simulasi dengan cpapOn === on. */
+function groupStats(samples, events, on) {
+  let dur = 0;
+  let sumEff = 0;
+  let sumVe = 0;
+  let sumRes = 0;
+  let n = 0;
+  let spo2Min = null;
+  let arousals = 0;
+  let prevAroused = false;
+  let pcritSleep = null;
+
+  samples.forEach((s, i) => {
+    if (!!s.cpapOn !== on) {
+      prevAroused = false;
+      return;
+    }
+    const dt = sampleDt(samples, i);
+    dur += dt;
+    n += 1;
+    sumEff += s.effectiveObstruction ?? 0;
+    sumVe += s.ve ?? 0;
+    sumRes += s.resistance ?? 0;
+    if (s.spo2 != null) spo2Min = spo2Min == null ? s.spo2 : Math.min(spo2Min, s.spo2);
+    if (s.aroused && !prevAroused) arousals += 1;
+    prevAroused = !!s.aroused;
+    if (s.pcrit != null) pcritSleep = pcritSleep == null ? s.pcrit : Math.max(pcritSleep, s.pcrit);
   });
-  pressure.setData(samples.map((s) => ({ t: s.t, target: s.target, actual: s.actual })));
 
-  const volume = new LineChart(qs('#a-canvas-volume'), {
-    theme: 'light',
-    unit: ' L',
-    yLabel: 'Volume (L)',
-    decimals: 2,
-    yMin: 0,
-    yMax: 6.5,
-    refLines: [
-      { y: PHYSIOLOGY.TLC, label: 'TLC' },
-      { y: PHYSIOLOGY.FRC, label: 'FRC' },
-      { y: PHYSIOLOGY.RV, label: 'RV' }
-    ],
-    series: [{ key: 'volume', color: '#E8798A', width: 1.6 }]
-  });
-  volume.setData(samples.map((s) => ({ t: s.t, volume: s.volume })));
+  const mine = events.filter((e) => (e.type === 'apnea' || e.type === 'hypopnea') && cpapAt(samples, e.start) === on);
+  const apnea = mine.filter((e) => e.type === 'apnea').length;
+  const hypopnea = mine.filter((e) => e.type === 'hypopnea').length;
+  const ahi = dur >= MIN_AHI_SEC ? ((apnea + hypopnea) / dur) * 3600 : null;
 
-  const spo2 = new LineChart(qs('#a-canvas-spo2'), {
-    theme: 'light',
-    unit: ' %',
-    yLabel: 'SpO₂ (%)',
-    yMin: 80,
-    yMax: 100,
-    refLines: [{ y: 90, label: 'Desaturasi < 90%', color: 'rgba(217, 74, 74, 0.8)' }],
-    series: [{ key: 'spo2', color: '#5BA4E6' }]
-  });
-  spo2.setData(samples.map((s) => ({ t: s.t, spo2: s.spo2 })));
+  return {
+    duration: dur,
+    present: n > 0,
+    apnea,
+    hypopnea,
+    ahi,
+    spo2Min,
+    effMean: n ? sumEff / n : null,
+    veMean: n ? sumVe / n : null,
+    resMean: n ? sumRes / n : null,
+    arousals,
+    pcritSleep
+  };
+}
 
-  const airflow = new LineChart(qs('#a-canvas-airflow'), {
-    theme: 'light',
-    unit: ' L/min',
-    yLabel: 'L/min',
-    series: [{ key: 'flow', color: '#7DD3D0', fill: true }]
-  });
-  airflow.setData(samples.map((s) => ({ t: s.t, flow: s.flow })));
-
-  const blower = new LineChart(qs('#a-canvas-blower'), {
-    theme: 'light',
-    unit: '%',
-    yLabel: 'Output (%)',
-    yMin: 0,
-    yMax: 100,
-    series: [{ key: 'blower', color: '#F4B942', fill: true }]
-  });
-  blower.setData(samples.map((s) => ({ t: s.t, blower: s.blower })));
-
-  const obstruction = new LineChart(qs('#a-canvas-obstruction'), {
-    theme: 'light',
-    unit: '%',
-    yLabel: 'Obstruksi (%)',
-    yMin: 0,
-    yMax: 100,
-    series: [
-      { key: 'obstruction', color: '#D94A4A', label: 'Severity', fill: true },
-      { key: 'effective', color: '#F4B942', label: 'Efektif', dashed: true }
-    ]
-  });
-  obstruction.setData(samples.map((s) => ({ t: s.t, obstruction: s.obstruction, effective: s.effectiveObstruction })));
-
-  charts = [pressure, volume, airflow, spo2, blower, obstruction];
-
-  // --- BAGIAN YANG DIUBAH: Gunakan style.display = 'none' ---
-  ['pressure', 'volume', 'airflow', 'spo2', 'blower', 'obstruction'].forEach((id) => {
-    const emptyEl = qs(`#a-empty-${id}`);
-    if (emptyEl) {
-       emptyEl.style.display = 'none';
+/** Metrik respons PID pada segmen CPAP-ON terpanjang. */
+function pidStats(samples) {
+  const segs = [];
+  let start = null;
+  samples.forEach((s, i) => {
+    if (s.cpapOn && start == null) start = i;
+    if ((!s.cpapOn || i === samples.length - 1) && start != null) {
+      const end = s.cpapOn ? i : i - 1;
+      segs.push([start, end]);
+      start = null;
     }
   });
-  // -----------------------------------------------------------
+  if (!segs.length) return null;
+  const [a, b] = segs.reduce((best, seg) => (seg[1] - seg[0] > best[1] - best[0] ? seg : best));
+  const seg = samples.slice(a, b + 1);
+  if (seg.length < 5) return null;
+
+  const t0 = seg[0].t;
+  const target = seg[seg.length - 1].target;
+  const tol = Math.max(1, target * 0.1);
+  const segDur = seg[seg.length - 1].t - t0;
+
+  const p0 = seg[0].actual;
+  const rise = seg.find((s) => s.actual >= p0 + 0.9 * (target - p0));
+  const riseTime = rise ? rise.t - t0 : null;
+
+  const peak = Math.max(...seg.map((s) => s.actual));
+  // Overshoot hanya dari respons awal (sebelum settle), bukan riak napas
+  const overshoot = Math.max(0, ((peak - target) / target) * 100);
+
+  let lastOut = -1;
+  seg.forEach((s, i) => {
+    if (Math.abs(s.error) > tol) lastOut = i;
+  });
+  const settled = lastOut < seg.length - 1;
+  const settlingTime = settled ? seg[Math.min(lastOut + 1, seg.length - 1)].t - t0 : null;
+
+  const tailStart = seg[seg.length - 1].t - Math.min(10, segDur / 2);
+  const tail = seg.filter((s) => s.t >= tailStart);
+  const sse = tail.reduce((acc, s) => acc + Math.abs(s.error), 0) / tail.length;
+  const ripple = Math.max(...tail.map((s) => s.actual)) - Math.min(...tail.map((s) => s.actual));
+  const meanActual = tail.reduce((acc, s) => acc + s.actual, 0) / tail.length;
+
+  return {
+    duration: segDur,
+    target,
+    tol,
+    riseTime,
+    overshoot,
+    settlingTime,
+    sse,
+    ripple,
+    meanActual,
+    peakBlower: Math.max(...seg.map((s) => s.blower)),
+    meanBlower: tail.reduce((acc, s) => acc + s.blower, 0) / tail.length,
+    peakPressure: peak
+  };
 }
 
-// Standard English decimal formatting (dot separator)
-function enNum(value, digits = 1) {
-  return value.toFixed(digits);
+/* ---------------------------------------------------------------------- */
+/* Tampilan                                                                */
+/* ---------------------------------------------------------------------- */
+
+function renderComparison({ off, on }) {
+  const wrap = qs('#compare-wrap');
+  if (!wrap) return;
+
+  const cell = (g, fn) => (g.present ? fn(g) : '<span class="analysis-muted">tidak dijalankan</span>');
+  const ahiCell = (g) =>
+    g.ahi == null
+      ? `<span class="analysis-muted">butuh ≥ ${MIN_AHI_SEC} s (baru ${fmt(g.duration, 0)} s)</span>`
+      : `<b>${fmt(g.ahi, 0)}</b> /jam · <span class="sev sev-${sevClass(g.ahi)}">${ahiSeverity(g.ahi)}</span>`;
+
+  const rows = [
+    ['Durasi', (g) => `${fmt(g.duration, 0)} s`, 'Lama bagian simulasi pada kondisi ini.'],
+    ['AHI (estimasi)', ahiCell, 'Kejadian per jam — ukuran utama derajat OSA.'],
+    ['Apnea', (g) => `${g.apnea}`, 'VT turun ≥ 90 % selama ≥ 10 s.'],
+    ['Hipopnea', (g) => `${g.hypopnea}`, 'VT turun ≥ 30 % ≥ 10 s + desaturasi ≥ 3 %.'],
+    ['Arousal', (g) => `${g.arousals}`, 'Berapa kali pasien terbangun sejenak karena jalan napas tertutup.'],
+    ['SpO₂ terendah', (g) => (g.spo2Min == null ? '--' : `<span class="${g.spo2Min < 90 ? 'val-bad' : ''}">${fmt(g.spo2Min, 0)} %</span>`), 'Normal ≥ 95 %; < 90 % = desaturasi bermakna.'],
+    ['Obstruksi efektif rata-rata', (g) => `${fmt(g.effMean, 0)} %`, 'Seberapa tertutup faring rata-rata.'],
+    ['Resistansi rata-rata', (g) => `${fmt(g.resMean, 1)} cmH₂O·s/L`, 'Normal ±3.'],
+    ['Ventilasi semenit rata-rata', (g) => `${fmt(g.veMean, 1)} L/min`, 'Normal 5–8 L/min saat istirahat.']
+  ];
+
+  wrap.innerHTML = `
+    <table class="compare-table">
+      <thead>
+        <tr><th>Indikator</th><th>Tanpa CPAP</th><th>Dengan CPAP</th><th>Keterangan</th></tr>
+      </thead>
+      <tbody>
+        ${rows.map(([label, fn, note]) => `
+          <tr>
+            <td>${label}</td>
+            <td>${cell(off, fn)}</td>
+            <td>${cell(on, fn)}</td>
+            <td class="analysis-muted">${note}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
 }
 
-/**
- * Builds a short, factual interpretation of the recorded run in English.
- */
-function buildInterpretation(stats, osa) {
-  const sentences = [];
+function renderPid(pid) {
+  const grid = qs('#pid-grid');
+  if (!grid || !pid) return;
 
-  // CPAP tidak pernah menyala → loop kendali terbuka; evaluasi PID tidak relevan
-  if (stats.peakBlower <= 0.5) {
-    sentences.push(
-      'CPAP was off for the whole recorded run, so the PID loop was open and the mask pressure stayed at atmospheric level (0 cmH₂O). The pressure-tracking metrics above therefore do not describe controller performance; this run shows the untreated (baseline) OSA condition.'
-    );
-    return appendOsa(sentences, osa).join(' ');
-  }
+  const tiles = [
+    ['Setpoint (target)', `${fmt(pid.target, 1)} <small>cmH₂O</small>`, 'Tekanan yang diminta ke kontroler.'],
+    ['Rise time', pid.riseTime == null ? '<small>tidak tercapai</small>' : `${fmt(pid.riseTime, 2)} <small>s</small>`, 'Waktu mencapai 90 % target sejak CPAP dinyalakan.'],
+    ['Overshoot', `${fmt(pid.overshoot, 1)} <small>%</small>`, 'Seberapa jauh tekanan melampaui target. Ideal < 10 %.'],
+    ['Settling time', pid.settlingTime == null ? '<small>belum stabil</small>' : `${fmt(pid.settlingTime, 1)} <small>s</small>`, `Waktu sampai error tetap dalam ±${fmt(pid.tol, 1)} cmH₂O.`],
+    ['Steady-state error', `${fmt(pid.sse, 2)} <small>cmH₂O</small>`, 'Rata-rata |error| 10 s terakhir.'],
+    ['Riak tekanan', `${fmt(pid.ripple, 2)} <small>cmH₂O</small>`, 'Variasi tekanan akibat napas pasien (gangguan).'],
+    ['Output blower rata-rata', `${fmt(pid.meanBlower, 0)} <small>%</small>`, `Puncak ${fmt(pid.peakBlower, 0)} %. Mendekati 100 % = aktuator jenuh.`]
+  ];
 
-  const finalError = stats.finalTarget - stats.finalActual;
-  const absFinalError = Math.abs(finalError);
+  grid.innerHTML = tiles.map(([label, value, desc]) => `
+    <div class="stat-tile">
+      <span class="stat-label">${label}</span>
+      <span class="stat-value">${value}</span>
+      <span class="stat-desc">${desc}</span>
+    </div>`).join('');
+}
 
-  sentences.push(
-    `The actual pressure at the end of the simulation was ${enNum(stats.finalActual)} cmH₂O against a target of ${enNum(stats.finalTarget)} cmH₂O.`
+function buildCharts(samples, events) {
+  // Interval CPAP-ON sebagai pita hijau
+  const cpapBands = [];
+  let st = null;
+  samples.forEach((s, i) => {
+    if (s.cpapOn && st == null) st = s.t;
+    if ((!s.cpapOn || i === samples.length - 1) && st != null) {
+      cpapBands.push({ start: st, end: s.t, type: 'cpap' });
+      st = null;
+    }
+  });
+  const bands = cpapBands.concat(events);
+
+  // Downsample untuk grafik statis agar ringan (maks ±1500 titik)
+  const step = Math.max(1, Math.floor(samples.length / 1500));
+  const data = samples.filter((_, i) => i % step === 0);
+
+  const common = { theme: 'light' };
+  const make = (id, opts, map) => {
+    const c = new LineChart(qs(`#a-canvas-${id}`), { ...common, ...opts });
+    c.setData(data.map(map));
+    c.setBands(bands);
+    const empty = qs(`#a-empty-${id}`);
+    if (empty) empty.style.display = 'none';
+    return c;
+  };
+
+  charts = [
+    make('pressure', {
+      unit: ' cmH₂O', yLabel: 'cmH₂O', yMin: -2, yMax: 20,
+      series: [
+        { key: 'target', color: '#7DD3D0', dashed: true, label: 'Target', width: 1.6 },
+        { key: 'actual', color: '#0F9D9A', label: 'Aktual', width: 1.6 }
+      ]
+    }, (s) => ({ t: s.t, target: s.cpapOn ? s.target : null, actual: s.actual })),
+    make('airflow', {
+      unit: ' L/min', yLabel: 'L/min', yMin: -80, yMax: 80,
+      series: [{ key: 'flow', color: '#2B8C89', width: 1.2 }]
+    }, (s) => ({ t: s.t, flow: s.flow })),
+    make('volume', {
+      unit: ' L', yLabel: 'Volume (L)', decimals: 2, yMin: 0, yMax: 6.5,
+      refLines: [
+        { y: PHYSIOLOGY.TLC, label: 'TLC' },
+        { y: PHYSIOLOGY.FRC, label: 'FRC' },
+        { y: PHYSIOLOGY.RV, label: 'RV' }
+      ],
+      series: [{ key: 'volume', color: '#E8798A', width: 1.4 }]
+    }, (s) => ({ t: s.t, volume: s.volume })),
+    make('spo2', {
+      unit: ' %', yLabel: 'SpO₂ (%)', decimals: 0, yMin: 80, yMax: 100,
+      refLines: [{ y: 90, label: '90 %', color: 'rgba(217, 74, 74, 0.8)' }],
+      series: [{ key: 'spo2', color: '#3B82C4', width: 1.8 }]
+    }, (s) => ({ t: s.t, spo2: s.spo2 })),
+    make('blower', {
+      unit: ' %', yLabel: 'Output (%)', decimals: 0, yMin: 0, yMax: 100,
+      series: [{ key: 'blower', color: '#E0A526', width: 1.4 }]
+    }, (s) => ({ t: s.t, blower: s.blower })),
+    make('obstruction', {
+      unit: ' %', yLabel: 'Obstruksi (%)', decimals: 0, yMin: 0, yMax: 100,
+      series: [
+        { key: 'severity', color: '#D94A4A', label: 'Severity', width: 1.6 },
+        { key: 'effective', color: '#E0A526', label: 'Efektif', dashed: true, width: 1.6 }
+      ]
+    }, (s) => ({ t: s.t, severity: s.obstruction, effective: s.effectiveObstruction }))
+  ];
+}
+
+/* ---------------------------------------------------------------------- */
+/* Interpretasi                                                            */
+/* ---------------------------------------------------------------------- */
+
+function buildInterpretation({ off, on }, pid, duration) {
+  const out = [];
+
+  out.push(
+    `Simulasi berjalan ${fmt(duration, 0)} s: ${fmt(off.duration, 0)} s tanpa CPAP dan ${fmt(on.duration, 0)} s dengan CPAP.`
   );
 
-  // Toleransi ±1 cmH2O (atau 10 %) — setara akurasi alat CPAP komersial
-  if (absFinalError <= Math.max(1, stats.finalTarget * 0.1)) {
-    sentences.push(
-      `A final error of ${enNum(absFinalError, 2)} cmH₂O indicates that the pressure reached the target reasonably well.`
-    );
-  } else {
-    sentences.push(
-      `A final error of ${enNum(absFinalError, 2)} cmH₂O indicates that the pressure did not fully reach the target. Adjusting the Ki value may help reduce this steady-state error.`
-    );
-  }
-
-  if (stats.settlingTime != null) {
-    sentences.push(
-      `The system reached stability (settling time) after approximately ${enNum(stats.settlingTime)} seconds, and the pressure remained within the tolerance band until the end of the simulation.`
-    );
-  } else {
-    sentences.push(
-      'The pressure did not reach stability within the tolerance band during the recorded simulation. This condition may be caused by a high level of obstruction relative to the current Kp, Ki, and Kd values.'
-    );
-  }
-
-  const startupDominated = stats.maxError > stats.lateMaxError * 1.8 && stats.maxError > 2;
-  if (startupDominated) {
-    sentences.push(
-      `The maximum error during the simulation (${enNum(stats.maxError)} cmH₂O) occurred during the initial phase when the pressure rose from zero to the target, which is a normal transient condition at startup.`
-    );
-  }
-
-  const lateThreshold = Math.max(1, stats.finalTarget * 0.15);
-  if (stats.lateMaxError > lateThreshold) {
-    sentences.push(
-      `During the later part of the simulation, the error still reached ${enNum(stats.lateMaxError)} cmH₂O. Adjusting Kp or Ki may help tighten the pressure tracking against the target.`
-    );
-  } else {
-    sentences.push(
-      `During the later part of the simulation, the error remained within ${enNum(stats.lateMaxError)} cmH₂O, which is a relatively small deviation from the target.`
-    );
-  }
-
-  if (stats.peakBlower >= 99) {
-    sentences.push(
-      'The blower output reached 100% during the simulation. This indicates that the actuator is working at maximum capacity to overcome the given obstruction.'
-    );
-  }
-
-  return appendOsa(sentences, osa).join(' ');
-}
-
-function appendOsa(sentences, osa) {
-  if (osa) {
-    const total = osa.apneaCount + osa.hypopneaCount;
-    if (osa.ahi != null) {
-      sentences.push(
-        `Breath analysis detected ${osa.apneaCount} apnea and ${osa.hypopneaCount} hypopnea event(s), giving an AHI of ${enNum(osa.ahi, 0)} events/hour (${ahiSeverityEn(osa.ahi)} by AASM criteria: <5 normal, 5–15 mild, 15–30 moderate, ≥30 severe).`
+  // --- Kondisi tanpa CPAP
+  if (off.present) {
+    const total = off.apnea + off.hypopnea;
+    if (total > 0) {
+      out.push(
+        `<b>Tanpa CPAP</b>, terdeteksi ${off.apnea} apnea dan ${off.hypopnea} hipopnea` +
+        (off.ahi != null ? ` (AHI ${fmt(off.ahi, 0)}/jam, kategori <b>${ahiSeverity(off.ahi).toLowerCase()}</b>)` : '') +
+        `, dengan ${off.arousals} kali arousal dan SpO₂ terendah ${fmt(off.spo2Min, 0)} %. ` +
+        `Obstruksi efektif rata-rata ${fmt(off.effMean, 0)} % menunjukkan faring berulang kali kolaps karena ` +
+        `tekanan di dalamnya (≈ 0 cmH₂O) lebih rendah dari Pcrit pasien (${fmt(off.pcritSleep, 1)} cmH₂O).`
+      );
+    } else if (off.arousals > 0) {
+      out.push(
+        `<b>Tanpa CPAP</b>, jalan napas menyempit dan pasien mengalami ${off.arousals} arousal, tetapi penurunan napas ` +
+        `belum memenuhi kriteria apnea/hipopnea (desaturasi < 3 %). Kondisi ini mirip <i>respiratory effort-related arousal</i> ` +
+        `(mendengkur berat). Naikkan OSA Severity ke ≥ 80 % untuk memunculkan kejadian.`
+      );
+    } else {
+      out.push(
+        `<b>Tanpa CPAP</b>, tidak terjadi kolaps faring (obstruksi efektif rata-rata ${fmt(off.effMean, 0)} %). ` +
+        `Pcrit pasien (${fmt(off.pcritSleep, 1)} cmH₂O) masih di bawah tekanan faring, sehingga jalan napas tetap terbuka.`
       );
     }
-    if (osa.spo2Min != null) {
-      sentences.push(
-        osa.spo2Min < 90
-          ? `Oxygen saturation fell to ${enNum(osa.spo2Min, 0)}%, below the 90% clinical threshold, reflecting the ventilation lost during obstructive events.`
-          : `Oxygen saturation stayed at or above ${enNum(osa.spo2Min, 0)}% throughout the run.`
+  }
+
+  // --- Kondisi dengan CPAP
+  if (on.present) {
+    const total = on.apnea + on.hypopnea;
+    let text = `<b>Dengan CPAP</b> ${fmt(pid?.target ?? 0, 1)} cmH₂O, terdeteksi ${on.apnea} apnea dan ${on.hypopnea} hipopnea` +
+      (on.ahi != null ? ` (AHI ${fmt(on.ahi, 0)}/jam, ${ahiSeverity(on.ahi).toLowerCase()})` : '') +
+      `, SpO₂ terendah ${fmt(on.spo2Min, 0)} %, dan obstruksi efektif rata-rata ${fmt(on.effMean, 0)} %.`;
+    if (off.present && off.ahi != null && on.ahi != null) {
+      text += ` AHI turun dari ${fmt(off.ahi, 0)} menjadi ${fmt(on.ahi, 0)} kejadian/jam.`;
+    }
+    out.push(text);
+
+    if (total === 0 && on.effMean != null && on.effMean < 30) {
+      out.push(
+        'Artinya tekanan positif yang dijaga kontroler berhasil <b>membidai faring</b> (pneumatic splint): tekanan faring ' +
+        'tetap di atas Pcrit sehingga jalan napas terbuka dan napas kembali normal.'
+      );
+    } else if (on.pcritSleep != null && pid) {
+      const needed = Math.ceil(on.pcritSleep + 4);
+      out.push(
+        `CPAP belum sepenuhnya efektif. Pcrit pasien ${fmt(on.pcritSleep, 1)} cmH₂O, sehingga tekanan target sebaiknya ` +
+        `dinaikkan ke sekitar <b>${needed} cmH₂O</b> (Pcrit + ±4 cmH₂O) — prinsip yang sama dengan titrasi CPAP di klinik.`
       );
     }
-    if (total === 0 && osa.ahi != null) {
-      sentences.push('No obstructive events met the ≥10 s criterion, meaning the upper airway stayed sufficiently open (or was kept open by CPAP).');
-    }
-    sentences.push('Note: AHI is extrapolated from a short simulated run; clinical AHI is measured over a full night of sleep.');
+  } else {
+    out.push('CPAP belum dinyalakan pada rekaman ini, sehingga efek terapi dan kinerja PID belum bisa dinilai.');
   }
-  return sentences;
+
+  // --- Kinerja PID
+  if (pid) {
+    const parts = [];
+    parts.push(
+      `<b>Kinerja PID:</b> tekanan mencapai 90 % target dalam ${pid.riseTime == null ? '— (tidak tercapai)' : `${fmt(pid.riseTime, 2)} s`}, ` +
+      `overshoot ${fmt(pid.overshoot, 1)} %, ` +
+      (pid.settlingTime == null ? 'dan belum stabil dalam toleransi' : `stabil setelah ${fmt(pid.settlingTime, 1)} s`) +
+      `, dengan steady-state error ${fmt(pid.sse, 2)} cmH₂O dan riak ±${fmt(pid.ripple / 2, 2)} cmH₂O akibat napas pasien.`
+    );
+    const tips = [];
+    if (pid.overshoot > 10) tips.push('overshoot > 10 % → kurangi Kp/Ki atau naikkan Kd');
+    if (pid.settlingTime == null) tips.push('belum stabil → naikkan Ki atau periksa apakah blower jenuh');
+    if (pid.sse > 0.5) tips.push('steady-state error besar → naikkan Ki');
+    if (pid.riseTime != null && pid.riseTime > 3) tips.push('respons lambat → naikkan Kp');
+    if (pid.peakBlower >= 99) tips.push('blower sempat 100 % (jenuh) — anti-windup mencegah integral menumpuk');
+    parts.push(tips.length ? `Saran penalaan: ${tips.join('; ')}.` : 'Respons sudah baik: cepat, overshoot kecil, dan stabil di sekitar target.');
+    out.push(parts.join(' '));
+  }
+
+  out.push(
+    '<i>Catatan: AHI di simulator adalah estimasi dari beberapa menit simulasi. Secara klinis AHI diukur semalaman ' +
+    'dengan polisomnografi. Model ini bersifat edukatif, bukan model klinis tervalidasi.</i>'
+  );
+  return out;
 }
 
-function ahiSeverityEn(ahi) {
-  return { Normal: 'normal', Ringan: 'mild OSA', Sedang: 'moderate OSA', Berat: 'severe OSA' }[ahiSeverity(ahi)];
+/* ---------------------------------------------------------------------- */
+/* Util                                                                    */
+/* ---------------------------------------------------------------------- */
+
+function fmt(v, digits = 1) {
+  if (v == null || !Number.isFinite(v)) return '--';
+  return v.toFixed(digits).replace('.', ',');
+}
+
+function sevClass(ahi) {
+  if (ahi < 5) return 'normal';
+  if (ahi < 15) return 'mild';
+  if (ahi < 30) return 'moderate';
+  return 'severe';
 }
 
 export function dispose() {
